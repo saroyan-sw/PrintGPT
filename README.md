@@ -1,9 +1,38 @@
-# PrintGPT A4 Alignment
+# PrintGPT
 
-This package establishes a physical A4 coordinate system, renders a printable
-four-marker calibration page, detects and rectifies captures, generates
-deterministic synthetic cases, and evaluates alignment in pixels and
-millimetres.
+PrintGPT aligns a marked A4 scan, protects the page's existing ink, generates
+two continuation candidates, validates and criticizes sanitized previews, and
+exports only the explicitly approved new ink. The dependable MVP path is
+offline and deterministic; the optional Gemini adapter remains separately
+verifiable.
+
+## Integrated offline MVP
+
+Install the project and Streamlit interface:
+
+```powershell
+python -m pip install -e ".[app]"
+```
+
+Run an input-to-approved-PDF demonstration:
+
+```powershell
+printgpt-mvp-demo artifacts/mvp_example
+```
+
+Run the approval interface:
+
+```powershell
+python -m streamlit run src/printgpt_mvp/streamlit_app.py
+```
+
+The interface accepts a supported image or PDF, requires an explicit allowed
+completion rectangle, displays both model candidates and the actual sanitized
+print previews, and creates no printable output until the user approves an
+eligible candidate. The export is a toner-only PNG and a 210 × 297 mm PDF.
+Print the PDF at **100% / Actual Size** with Fit, Shrink, borderless expansion,
+and automatic rotation disabled. See [`docs/mvp.md`](docs/mvp.md) for the
+end-to-end contract and physical-printer limitations.
 
 ## Guided notebook
 
@@ -39,3 +68,7 @@ a raster image because OpenCV's alignment calculations operate on pixels.
 
 When running without installing the package, set `PYTHONPATH=src` first.
 Print the calibration PDF at actual size (100%) with all fit-to-page options disabled.
+
+Component details: [masking](docs/masking.md),
+[generation and criticism](docs/generation.md), and
+[parallel-development contract](docs/PARALLEL_DEVELOPMENT.md).

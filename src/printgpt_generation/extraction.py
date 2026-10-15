@@ -42,6 +42,7 @@ from .models import (
     RGBImage,
     RegistrationReport,
     readonly_copy,
+    require_rgb_image,
 )
 
 
@@ -271,8 +272,18 @@ def normalize_and_extract(
     layout: A4CalibrationLayout,
     config: ExtractionConfig,
     additions_mask: np.ndarray | None = None,
+    source_page: RGBImage | None = None,
 ) -> NormalizationOutcome:
-    """Map raw provider output to canonical pixels and extract proposed new ink."""
+    """Map provider output to canonical pixels and extract proposed new ink.
+
+    When available, ``source_page`` supplies the registration reference. Track
+    A deliberately detects a wider range of faint ink than this module's
+    dark-neutral extraction threshold. Comparing that broad mask directly with
+    dark candidate pixels makes unchanged antialiased source ink look missing.
+    Registration therefore compares the same dark-neutral class on both source
+    and candidate, while extraction and protection continue to use Track A's
+    complete existing-ink mask.
+    """
     input_shape = tuple(int(value) for value in raw_image.shape)
     rgb = to_rgb_uint8(raw_image)
     if rgb is None:
@@ -302,7 +313,11 @@ def normalize_and_extract(
 
     existing = existing_ink_mask > 0
     ink_classes = dark_neutral_ink(canonical, config)
-    registration = check_registration(existing, ink_classes[0], layout, config)
+    registration_source = existing
+    if source_page is not None:
+        require_rgb_image(source_page, layout.image_shape, "source_page")
+        registration_source = existing & dark_neutral_ink(source_page, config)[0]
+    registration = check_registration(registration_source, ink_classes[0], layout, config)
     failures = _registration_failures(registration, config)
     if failures:
         return _rejection(
