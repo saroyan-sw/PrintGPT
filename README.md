@@ -36,6 +36,12 @@ end-to-end contract and physical-printer limitations.
 
 ## Guided notebook
 
+Open [`notebooks/03_mvp_agentic_system.ipynb`](notebooks/03_mvp_agentic_system.ipynb)
+for the executed, visual explanation of the complete agentic MVP. It shows the
+bounded LangGraph loop, protection masks, rejection and revision path, both
+candidate images, sanitized approval previews, safety assertions, approval
+gate, and exact-size export proof.
+
 Open [`notebooks/01_a4_alignment_pipeline.ipynb`](notebooks/01_a4_alignment_pipeline.ipynb)
 for the visual, reproducible walkthrough. It shows the calibration layout,
 marker detection, rectification, independent ground-truth overlay, 30-case
