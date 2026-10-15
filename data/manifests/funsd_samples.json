@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "dataset": "FUNSD",
+  "purpose": "Evaluation-only scanned-document backgrounds for PrintGPT alignment tests",
+  "source_archive_filename": "dataset.zip",
+  "source_archive_sha256": "c31735649e4f441bcbb4fd0f379574f7520b42286e80b01d80b445649d54761f",
+  "source_split": "testing_data",
+  "selection_method": "Deterministic farthest-point sampling over page aspect ratio, intensity, contrast, ink density, edge density, border noise, entropy, and connected-component count; visually reviewed.",
+  "count": 15,
+  "license_note": "FUNSD terms restrict use to non-commercial research and educational purposes. Do not redistribute these images without verifying the source terms.",
+  "files": [
+    {
+      "selection_rank": 1,
+      "filename": "87093315_87093318.png",
+      "source_member": "dataset/testing_data/images/87093315_87093318.png",
+      "width_px": 771,
+      "height_px": 1000,
+      "sha256": "3522b6f82fd8af414dabc099b286e5f4d956d698e9bbf8d21fb2f28ee8219916"
+    },
+    {
+      "selection_rank": 2,
+      "filename": "87594142_87594144.png",
+      "source_member": "dataset/testing_data/images/87594142_87594144.png",
+      "width_px": 774,
+      "height_px": 1000,
+      "sha256": "f73cf198e50f7dd4b9336b4183d40601d8046bff37fa71dde6681f71300e2912"
+    },
+    {
+      "selection_rank": 3,
+      "filename": "92380595.png",
+      "source_member": "dataset/testing_data/images/92380595.png",
+      "width_px": 802,
+      "height_px": 1000,
+      "sha256": "f1a21dad23a7a06984ad8bf73fd15ee9370c1af18db1e04d2d15427865a8f394"
+    },
+    {
+      "selection_rank": 4,
+      "filename": "82504862.png",
+      "source_member": "dataset/testing_data/images/82504862.png",
+      "width_px": 754,
+      "height_px": 1000,
+      "sha256": "9a66fa4013bf93b9ba4e959feef7d6b2e278b714ca9d3d347b35aeb305b92626"
+    },
+    {
+      "selection_rank": 5,
+      "filename": "87137840.png",
+      "source_member": "dataset/testing_data/images/87137840.png",
+      "width_px": 767,
+      "height_px": 1000,
+      "sha256": "4bb25c67c9ff493c0ac71528c468495d8fe58ba3f5cd1ad3213456e2f1989f2a"
+    },
+    {
+      "selection_rank": 6,
+      "filename": "82253245_3247.png",
+      "source_member": "dataset/testing_data/images/82253245_3247.png",
+      "width_px": 754,
+      "height_px": 1000,
+      "sha256": "1023df93d5a35aba85c3ad232a4dbb9f6d8609068f5ec09f1c59a7e5738318d0"
+    },
+    {
+      "selection_rank": 7,
+      "filename": "89856243.png",
+      "source_member": "dataset/testing_data/images/89856243.png",
+      "width_px": 802,
+      "height_px": 1000,
+      "sha256": "ae62fe912bbbb5b1da6659385f45cfe0264a5feb472de264955e6a3b9565e1dc"
+    },
+    {
+      "selection_rank": 8,
+      "filename": "87086073.png",
+      "source_member": "dataset/testing_data/images/87086073.png",
+      "width_px": 802,
+      "height_px": 1000,
+      "sha256": "bd10809b73420704f0695cf8279c2548db2f511605fc506ea41a4b403a66eedf"
+    },
+    {
+      "selection_rank": 9,
+      "filename": "85240939.png",
+      "source_member": "dataset/testing_data/images/85240939.png",
+      "width_px": 769,
+      "height_px": 1000,
+      "sha256": "8f7678261aea1a8bfbedca998f0e46e3280529dedfd742244a5332fba203ce3b"
+    },
+    {
+      "selection_rank": 10,
+      "filename": "83594639.png",
+      "source_member": "dataset/testing_data/images/83594639.png",
+      "width_px": 754,
+      "height_px": 1000,
+      "sha256": "8e3c3a88b882d5b833779ede94e569243ec5ecbcf978da83c39222e58ef44264"
+    },
+    {
+      "selection_rank": 11,
+      "filename": "82092117.png",
+      "source_member": "dataset/testing_data/images/82092117.png",
+      "width_px": 754,
+      "height_px": 1000,
+      "sha256": "279654591d7de3745e5efaf39d3be413baab267be7170082d1922690566c5ad1"
+    },
+    {
+      "selection_rank": 12,
+      "filename": "86230203_0206.png",
+      "source_member": "dataset/testing_data/images/86230203_0206.png",
+      "width_px": 754,
+      "height_px": 1000,
+      "sha256": "d541ea59a3f57c4b10c39372583c276def40245cea68aa9d00bfdcabe6588a36"
+    },
+    {
+      "selection_rank": 13,
+      "filename": "82253058_3059.png",
+      "source_member": "dataset/testing_data/images/82253058_3059.png",
+      "width_px": 754,
+      "height_px": 1000,
+      "sha256": "4f017fd7a8dc63125cd4e7faafc3c97b8dc7cbef3a265e17878808dee489dda4"
+    },
+    {
+      "selection_rank": 14,
+      "filename": "87528380.png",
+      "source_member": "dataset/testing_data/images/87528380.png",
+      "width_px": 777,
+      "height_px": 1000,
+      "sha256": "4f0bf949394bfbbc751a12571ad9608c312b6d1acc42b76005be308a669d2cbe"
+    },
+    {
+      "selection_rank": 15,
+      "filename": "87528321.png",
+      "source_member": "dataset/testing_data/images/87528321.png",
+      "width_px": 794,
+      "height_px": 1000,
+      "sha256": "68c906a3871bfb7d1ed4a297db31d6ab69a83d51a7535bf155e8fa6b6d1e403b"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Notebook scratch files
+.ipynb_checkpoints/
+
+# Local environments and generated benchmark outputs
+.venv/
+artifacts/
+
+# Environment files and local logs
+.env
+.env.*
+!.env.example
+*.log
+
+# Licensed external evaluation data (keep local; do not redistribute)
+/data/scanned_docs/

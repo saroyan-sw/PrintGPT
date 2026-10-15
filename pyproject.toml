@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "printgpt-alignment"
+version = "0.1.0"
+description = "A4 calibration, detection, rectification, and alignment benchmarking for PrintGPT"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "opencv-contrib-python-headless",
+    "Pillow",
+    "reportlab",
+]
+
+[project.optional-dependencies]
+notebook = [
+    "jupyter>=1.1",
+    "matplotlib>=3.10",
+    "pandas>=2.2",
+]
+
+[project.scripts]
+printgpt-align = "printgpt_alignment.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
