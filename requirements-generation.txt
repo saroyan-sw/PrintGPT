@@ -1,0 +1,14 @@
+# Track B (printgpt_generation) dependencies beyond pyproject.toml.
+# Install after `python -m pip install -e .`:
+#   python -m pip install -r requirements-generation.txt
+
+# Required: orchestration and untrusted-boundary validation.
+langgraph>=1.2,<2
+pydantic>=2.7,<3
+
+# Optional: live Gemini adapter (printgpt_generation.gemini). Pinned exactly because
+# the adapter catches Interactions API errors from a module the SDK does not export.
+google-genai==2.31.0
+
+# Tests.
+pytest>=8
