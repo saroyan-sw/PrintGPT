@@ -11,6 +11,7 @@ import cv2
 from .benchmark import run_benchmark
 from .calibration_page import write_calibration_pdf, write_calibration_png
 from .detection import detect_and_rectify
+from .document import load_document_page
 from .geometry import DEFAULT_LAYOUT
 from .synthetic import generate_synthetic_benchmark
 from .smartdoc import prepare_smartdoc_benchmark
@@ -31,9 +32,11 @@ def build_parser() -> ArgumentParser:
     calibration.add_argument("--pdf", type=Path, default=Path("output/pdf/printgpt_a4_calibration_v1.pdf"))
     calibration.add_argument("--png", type=Path, default=Path("output/png/printgpt_a4_calibration_v1_300dpi.png"))
 
-    rectify = subparsers.add_parser("rectify", help="detect and rectify one scan or photograph")
-    rectify.add_argument("input", type=Path)
-    rectify.add_argument("--output", type=Path, required=True)
+    rectify = subparsers.add_parser("rectify", help="detect and rectify one PDF page, scan, or photograph")
+    rectify.add_argument("input", type=Path, help="PDF or raster image to process")
+    rectify.add_argument("--page", type=int, default=1, help="1-based PDF page number (default: 1)")
+    rectify.add_argument("--dpi", type=float, default=DEFAULT_LAYOUT.dpi, help="PDF rendering DPI (default: 300)")
+    rectify.add_argument("--output", type=Path, required=True, help="output raster image path")
     rectify.add_argument("--report", type=Path)
 
     generate = subparsers.add_parser("generate", help="generate deterministic synthetic cases")
@@ -67,13 +70,28 @@ def main(argv: list[str] | None = None) -> int:
         print(write_calibration_png(args.png))
         return 0
     if args.command == "rectify":
-        image = cv2.imread(str(args.input), cv2.IMREAD_UNCHANGED)
-        if image is None:
-            raise SystemExit(f"could not read {args.input}")
+        if args.page < 1:
+            raise SystemExit("--page must be 1 or greater")
+        try:
+            image = load_document_page(
+                args.input,
+                page_index=args.page - 1,
+                dpi=args.dpi,
+            )
+        except (FileNotFoundError, IndexError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
         result = detect_and_rectify(image)
         if args.report:
             args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
+            report = result.to_dict()
+            report.update(
+                {
+                    "input": str(args.input),
+                    "input_page": args.page,
+                    "pdf_render_dpi": args.dpi if args.input.suffix.lower() == ".pdf" else None,
+                }
+            )
+            args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         if not result.accepted or result.warped is None:
             print(f"rejected: {result.reason}")
             return 2
