@@ -70,9 +70,11 @@ later integration step; never print from this workflow.
 
 ## Provider, orchestration, and metadata
 
-Use LangGraph for explicit bounded state transitions if practical. Keep the
+Use LangGraph for the workflow's explicit bounded state transitions. Keep the
 generation/critic adapters replaceable. Implement deterministic generator AND
-critic doubles so tests need no API key, paid requests, or network.
+critic doubles so tests need no API key, paid requests, or network. LangGraph is
+required for orchestration in this track; model/provider logic must remain usable
+and testable independently of the graph.
 
 ## Project code style and LangGraph structure
 
