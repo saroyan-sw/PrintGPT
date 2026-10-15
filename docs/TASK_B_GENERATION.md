@@ -74,6 +74,83 @@ Use LangGraph for explicit bounded state transitions if practical. Keep the
 generation/critic adapters replaceable. Implement deterministic generator AND
 critic doubles so tests need no API key, paid requests, or network.
 
+## Project code style and LangGraph structure
+
+Match the style already used in `src/printgpt_alignment/`. Begin modules with a
+short module docstring and `from __future__ import annotations`. Use complete
+type hints, small functions with one clear job, descriptive names, explicit
+validation, and immutable value objects where practical. Existing project data
+objects use `@dataclass(frozen=True, slots=True)`; follow that pattern for
+internal domain values. Use Pydantic at untrusted boundaries such as model JSON,
+saved run metadata, and configuration loaded from outside Python.
+
+Keep domain logic independent of orchestration. Suggested package structure:
+
+```text
+src/printgpt_generation/
+    __init__.py       # small public API only
+    models.py         # typed domain and provider results
+    prompts.py        # default and revision prompt construction
+    providers.py      # protocols/interfaces and deterministic doubles
+    extraction.py     # candidate normalization and proposed-ink extraction
+    critic.py         # critic schema and interpretation
+    ranking.py        # deterministic eligibility and ranking rules
+    graph.py          # LangGraph state, nodes, routes, and graph factory
+    metadata.py       # JSON-safe run records
+```
+
+The filenames can change when there is a clear reason, but preserve these
+boundaries. `graph.py` should coordinate tested services rather than contain
+image processing, prompt construction, provider-specific parsing, or ranking
+formulas.
+
+Represent graph state with a typed schema whose fields have one documented
+meaning. Include the immutable request, candidate records, current candidate
+ID, attempt/revision counts, errors, and terminal outcome. Avoid a loose
+`dict[str, Any]`. Return explicit partial state updates from nodes; do not mutate
+shared lists, NumPy arrays, or nested records in place.
+
+Each LangGraph node should perform one visible transition, such as generating
+initial candidates, normalizing one candidate, validating one candidate,
+criticizing one preview, deciding whether to revise, or finalizing ranking.
+Name conditional routing functions after the decision they make and keep them
+pure. Route using typed status values/enums rather than checking for the
+presence of arbitrary dictionary keys.
+
+Build the graph through a factory that receives generator, validator, critic,
+clock/ID providers, and configuration as dependencies. Do not instantiate live
+clients at import time or read environment variables inside graph nodes. This
+makes the same compiled workflow runnable with deterministic doubles and live
+adapters. Keep the initial MVP execution synchronous unless a provider forces
+an async boundary; do not mix sync and async calls across otherwise identical
+nodes.
+
+The graph must be finite by construction. Encode the single-revision rule in
+state and routing, define an explicit terminal result for success and failure,
+and also set a conservative LangGraph recursion limit as a final guard. Provider
+transport retries belong inside a bounded adapter policy and must not increment
+the semantic revision count. Every generated revision re-enters normalization,
+validation, and criticism instead of jumping directly to ranking.
+
+If checkpointing is added, persist compact JSON metadata and artifact paths
+rather than embedding full NumPy arrays or encoded images in checkpoints.
+Checkpointing is optional for the MVP; a deterministic run record is required.
+Do not make core execution depend on a database or external service.
+
+Follow the existing repository's error style: raise `ValueError` for invalid
+programmer/configuration inputs, use explicit result states for expected model
+or candidate failures, and avoid broad exception swallowing. Use `pathlib.Path`,
+UTF-8 JSON with two-space indentation and a final newline, deterministic seeds
+for doubles, and no mutable module-level state. Add comments for reasons and
+constraints rather than narrating obvious statements.
+
+Tests should resemble the current focused pytest tests: arrange a small
+deterministic input, call a public boundary, and assert observable behavior.
+Name tests after the behavior. Test graph transitions and call counts through
+fakes instead of asserting LangGraph internals. A mock run with identical seed
+and input must produce identical decisions and metadata apart from injected
+time and IDs.
+
 For a live Gemini adapter, verify current official SDK/model capabilities before
 coding. Keep model IDs configurable and credentials in ignored environment
 variables/files. Report unavailable models or credentials clearly. Live smoke
