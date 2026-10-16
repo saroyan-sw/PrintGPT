@@ -185,8 +185,12 @@ class EmailScanService:
 
     # -- importing ----------------------------------------------------------------
 
-    def import_selected_scan(self, session_id: str, message_id: str, attachment_id: str) -> ImportResult:
-        """Import a specific attachment, e.g. after the user chose among candidates."""
+    def import_selected_scan(self, session_id: str, message_id: str, part_id: str) -> ImportResult:
+        """Import a specific attachment, e.g. after the user chose among candidates.
+
+        The attachment is identified by its MIME part ID because Gmail returns a
+        different attachmentId each time a message is fetched.
+        """
         session = self.get_scan_session_status(session_id)
         if session.status not in POLLABLE_STATUSES:
             return ImportResult(session=session, outcome=ImportOutcome.SESSION_CLOSED, detail=session.status.value)
@@ -194,7 +198,7 @@ class EmailScanService:
             (item for item in self.list_matching_scan_messages() if item.message_id == message_id), None
         )
         attachment = None if message is None else next(
-            (item for item in message.attachments if item.attachment_id == attachment_id), None
+            (item for item in message.attachments if item.part_id == part_id), None
         )
         if message is None or attachment is None:
             return ImportResult(session=session, outcome=ImportOutcome.NOT_FOUND, detail="no such scanner attachment")
@@ -214,6 +218,7 @@ class EmailScanService:
                 ScanSessionStatus.EMAIL_FOUND,
                 message_id=message.message_id,
                 attachment_id=attachment.attachment_id,
+                part_id=attachment.part_id,
                 received_at=message.received_at,
                 subject=message.subject,
                 original_filename=attachment.filename,
@@ -272,6 +277,7 @@ class EmailScanService:
                 ScanSessionStatus.WAITING_FOR_EMAIL,
                 message_id=None,
                 attachment_id=None,
+                part_id=None,
                 warnings=(*session.warnings, detail),
             )
             return ImportResult(session=waiting, outcome=ImportOutcome.ALREADY_PROCESSED, detail=detail)

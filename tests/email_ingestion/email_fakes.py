@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from copy import deepcopy
 from functools import lru_cache
 import io
 from pathlib import Path
@@ -46,15 +47,21 @@ def a4_png_bytes() -> bytes:
 
 
 class FakeGmail:
-    """In-memory Gmail: search returns every stored message, like a loose query."""
+    """In-memory Gmail: search returns every stored message, like a loose query.
+
+    Like real Gmail, every ``get_message`` call issues fresh attachmentIds; only
+    the MIME ``partId`` is stable. Downloads are recorded as (message, partId).
+    """
 
     def __init__(self, account: str = RECIPIENT) -> None:
         self.account = account
         self.messages: dict[str, dict[str, Any]] = {}
         self.attachments: dict[tuple[str, str], bytes] = {}
+        self.issued_attachment_ids: dict[str, tuple[str, str]] = {}
         self.queries: list[str] = []
         self.attachment_downloads: list[tuple[str, str]] = []
         self.fail_listing = False
+        self._fetches = 0
 
     def add_message(
         self,
@@ -70,11 +77,9 @@ class FakeGmail:
             {"mimeType": "text/plain", "filename": "", "body": {"size": 12, "data": "UHJpdmF0ZSBib2R5"}}
         ]
         for index, (filename, mime_type, data) in enumerate(attachments or []):
-            attachment_id = f"{message_id}-att{index}"
-            self.attachments[(message_id, attachment_id)] = data
-            parts.append(
-                {"mimeType": mime_type, "filename": filename, "body": {"attachmentId": attachment_id, "size": len(data)}}
-            )
+            part_id = str(index + 1)
+            self.attachments[(message_id, part_id)] = data
+            parts.append({"partId": part_id, "mimeType": mime_type, "filename": filename, "body": {"size": len(data)}})
         self.messages[message_id] = {
             "id": message_id,
             "internalDate": str(int(received_at.timestamp() * 1000)),
@@ -107,11 +112,20 @@ class FakeGmail:
         return [item["id"] for item in ordered][:max_results]
 
     def get_message(self, message_id: str) -> dict[str, Any]:
-        return self.messages[message_id]
+        self._fetches += 1
+        message = deepcopy(self.messages[message_id])
+        for part in message["payload"]["parts"]:
+            if "partId" in part:
+                attachment_id = f"{message_id}-{part['partId']}-fetch{self._fetches}"
+                self.issued_attachment_ids[attachment_id] = (message_id, part["partId"])
+                part["body"]["attachmentId"] = attachment_id
+        return message
 
     def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
-        self.attachment_downloads.append((message_id, attachment_id))
-        return self.attachments[(message_id, attachment_id)]
+        key = self.issued_attachment_ids[attachment_id]
+        assert key[0] == message_id
+        self.attachment_downloads.append(key)
+        return self.attachments[key]
 
 
 class SteppingClock:

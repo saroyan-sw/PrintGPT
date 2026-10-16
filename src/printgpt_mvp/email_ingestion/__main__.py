@@ -46,7 +46,7 @@ def _wait() -> int:
             continue
         if result.outcome is PollOutcome.NEEDS_SELECTION:
             for item in result.session.selection_candidates:
-                print(f"  candidate: {item.message_id} {item.attachment_id} {item.filename}")
+                print(f"  candidate: {item.message_id} part {item.part_id} {item.filename}")
             print("Several attachments arrived; import one from the app.")
             return 2
         if result.outcome is not PollOutcome.IMPORTED:
@@ -62,7 +62,7 @@ def _wait() -> int:
     preview = Path(imported.imported_path).parents[1] / "canonical_a4_preview.png"
     cv2.imwrite(str(preview), cv2.cvtColor(normalization.canonical_rgb, cv2.COLOR_RGB2BGR))
     print(f"  normalized A4 preview: {preview}")
-    duplicate = service.import_selected_scan(service.start_scan_session().session_id, imported.message_id or "", imported.attachment_id or "")
+    duplicate = service.import_selected_scan(service.start_scan_session().session_id, imported.message_id or "", imported.part_id or "")
     print(f"  second import of the same message: {duplicate.outcome.value}")
     return 0
 
