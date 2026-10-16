@@ -8,9 +8,11 @@ version = "0.1.0"
 description = "A4 calibration, detection, rectification, and alignment benchmarking for PrintGPT"
 requires-python = ">=3.12"
 dependencies = [
+    "langgraph>=1.2,<2",
     "numpy",
     "opencv-contrib-python-headless",
     "Pillow",
+    "pydantic>=2.7,<3",
     "pypdfium2>=4.30",
     "reportlab",
 ]
@@ -21,9 +23,16 @@ notebook = [
     "matplotlib>=3.10",
     "pandas>=2.2",
 ]
+app = [
+    "streamlit>=1.50,<2",
+]
+gemini = [
+    "google-genai==2.31.0",
+]
 
 [project.scripts]
 printgpt-align = "printgpt_alignment.cli:main"
+printgpt-mvp-demo = "printgpt_mvp.example:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

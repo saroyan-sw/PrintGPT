@@ -1,8 +1,8 @@
-# Track B (printgpt_generation) dependencies beyond pyproject.toml.
-# Install after `python -m pip install -e .`:
-#   python -m pip install -r requirements-generation.txt
+# Track B compatibility requirements.
+# LangGraph and Pydantic are now declared by pyproject.toml. This file also
+# installs the optional live Gemini SDK and test runner for adapter work.
 
-# Required: orchestration and untrusted-boundary validation.
+# Core constraints, repeated here for existing developer workflows.
 langgraph>=1.2,<2
 pydantic>=2.7,<3
 

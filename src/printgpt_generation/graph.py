@@ -244,7 +244,8 @@ class _Nodes:
             state["request"].masks.existing_ink_mask,
             self._deps.config.layout,
             self._deps.config.extraction,
-            output.additions_mask,
+            additions_mask=output.additions_mask,
+            source_page=state["request"].canonical_page,
         )
         updated = replace(
             attempt,

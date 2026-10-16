@@ -10,7 +10,7 @@ import cv2
 
 from .benchmark import run_benchmark
 from .calibration_page import write_calibration_pdf, write_calibration_png
-from .detection import detect_and_rectify
+from .detection import detect_and_rectify_document
 from .document import load_document_page
 from .geometry import DEFAULT_LAYOUT
 from .synthetic import generate_synthetic_benchmark
@@ -38,6 +38,7 @@ def build_parser() -> ArgumentParser:
     rectify.add_argument("--dpi", type=float, default=DEFAULT_LAYOUT.dpi, help="PDF rendering DPI (default: 300)")
     rectify.add_argument("--output", type=Path, required=True, help="output raster image path")
     rectify.add_argument("--report", type=Path)
+    rectify.add_argument("--input-kind", choices=["auto", "scan", "photo"], default="auto")
 
     generate = subparsers.add_parser("generate", help="generate deterministic synthetic cases")
     generate.add_argument("--output-dir", type=Path, default=Path("artifacts/synthetic"))
@@ -80,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         except (FileNotFoundError, IndexError, ValueError) as exc:
             raise SystemExit(str(exc)) from exc
-        result = detect_and_rectify(image)
+        result = detect_and_rectify_document(image, input_kind=args.input_kind)
         if args.report:
             args.report.parent.mkdir(parents=True, exist_ok=True)
             report = result.to_dict()

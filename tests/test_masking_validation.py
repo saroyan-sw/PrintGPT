@@ -124,6 +124,15 @@ def test_marker_and_quiet_zone_are_excluded() -> None:
     assert result.sanitized_new_ink_mask[50, 50] == 255
 
 
+def test_marker_regions_remain_available_for_unmarked_documents() -> None:
+    masks = _bundle(exclude_calibration_markers=False)
+    candidate = _mask()
+    candidate[19, 19] = 255
+    result = validate_candidate(candidate, masks, config=LENIENT)
+    assert result.metrics["layout_violation_pixels"] == 0
+    assert result.sanitized_new_ink_mask[19, 19] == 255
+
+
 def test_calibration_labels_and_layout_guides_are_excluded() -> None:
     masks = _bundle(layout_guide_clearance_mm=1.0, exclude_calibration_labels=True)
     candidate = _mask()
