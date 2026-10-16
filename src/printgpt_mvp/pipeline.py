@@ -18,12 +18,11 @@ from reportlab.pdfgen import canvas
 from printgpt_alignment import (
     A4CalibrationLayout,
     DEFAULT_LAYOUT,
-    detect_and_rectify_document,
-    load_document_page,
-    mm_to_px,
 )
 from printgpt_contracts import MaskBundle, MaskingConfig, ValidationConfig
 from printgpt_alignment.detection import InputKind
+from printgpt_alignment.document import load_document
+from printgpt_alignment.registration import RegistrationOptions, register_document
 from printgpt_generation import GenerationConfig, create_generation_request, run_generation, write_run_record
 from printgpt_generation.doubles import (
     CriticScript,
@@ -122,18 +121,16 @@ def canonicalize_document(
     page_index: int = 0,
     layout: A4CalibrationLayout = DEFAULT_LAYOUT,
     input_kind: InputKind = "auto",
+    registration: RegistrationOptions | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Load one supported image/PDF page, rectify it, and convert BGR to RGB once."""
     path = Path(input_path)
-    source = load_document_page(path, page_index=page_index, dpi=layout.dpi)
-    detection = detect_and_rectify_document(source, layout, input_kind=input_kind)
-    if not detection.accepted or detection.warped is None:
-        raise ValueError(f"page alignment rejected: {detection.reason}")
-    canonical = _rgb_from_alignment(detection.warped)
+    source = load_document(path, page_index=page_index, dpi=layout.dpi)
+    warped, report = register_document(source, layout=layout, input_kind=input_kind, options=registration)
+    canonical = _rgb_from_alignment(warped)
     expected = (*layout.image_shape, 3)
     if canonical.shape != expected:
         raise ValueError(f"aligned page must have shape {expected}, got {canonical.shape}")
-    report = detection.to_dict()
     report["input_path"] = str(path)
     report["page_index"] = page_index
     report["canonical_colour_space"] = "RGB"
@@ -157,10 +154,11 @@ def rectangular_allowed_region(
         raise ValueError("allowed region must have a positive size and non-negative origin")
     if x_mm + width_mm > layout.page_width_mm or y_mm + height_mm > layout.page_height_mm:
         raise ValueError("allowed region must stay inside the A4 page")
-    x0 = max(0, floor(mm_to_px(x_mm, layout.dpi)))
-    y0 = max(0, floor(mm_to_px(y_mm, layout.dpi)))
-    x1 = min(layout.raster_width_px, ceil(mm_to_px(x_mm + width_mm, layout.dpi)))
-    y1 = min(layout.raster_height_px, ceil(mm_to_px(y_mm + height_mm, layout.dpi)))
+    sx, sy = layout.raster_width_px / layout.page_width_mm, layout.raster_height_px / layout.page_height_mm
+    x0 = max(0, floor(x_mm * sx))
+    y0 = max(0, floor(y_mm * sy))
+    x1 = min(layout.raster_width_px, ceil((x_mm + width_mm) * sx))
+    y1 = min(layout.raster_height_px, ceil((y_mm + height_mm) * sy))
     mask = np.zeros(layout.image_shape, dtype=np.uint8)
     mask[y0:y1, x0:x1] = 255
     return mask
@@ -188,6 +186,8 @@ def _manifest_payload(
     *,
     approved: bool,
     exported_paths: dict[str, str | None],
+    alignment: dict[str, Any] | None = None,
+    printer: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     validation = selected.attempt.validation if selected is not None else None
     return {
@@ -211,6 +211,9 @@ def _manifest_payload(
             "simulated": validation.simulated,
         },
         "approved": approved,
+        "registration": (alignment or {}).get("registration"),
+        "coordinate_system": (alignment or {}).get("coordinate_system"),
+        "printer": printer or {"status": "unmeasured", "correction_applied": False},
         "exported_paths": exported_paths,
         "print_instruction": PRINT_AT_ACTUAL_SIZE,
     }
@@ -228,16 +231,17 @@ def run_offline_document(
     masking_config: MaskingConfig = MaskingConfig(),
     validation_config: ValidationConfig = ValidationConfig(),
     input_kind: InputKind = "auto",
+    registration: RegistrationOptions | None = None,
 ) -> MvpRun:
     """Run alignment, masking, generation, validation, criticism, and selection offline."""
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
     canonical, alignment = canonicalize_document(
-        input_path, page_index=page_index, layout=layout, input_kind=input_kind
+        input_path, page_index=page_index, layout=layout, input_kind=input_kind, registration=registration
     )
     _write_json(root / "alignment.json", alignment)
     effective_masking_config = masking_config
-    if alignment.get("alignment_method") in ("page_boundary", "scan_frame") and not (
+    if alignment.get("alignment_method") != "aruco" and not (
         set(alignment.get("detected_ids", ())) & set(layout.expected_marker_ids)
     ):
         effective_masking_config = replace(
@@ -246,13 +250,16 @@ def run_offline_document(
             exclude_calibration_labels=False,
             layout_guide_clearance_mm=0.0,
         )
-    if alignment.get("alignment_method") == "scan_frame":
-        # Letterboxing is not part of the original document or an allowed area.
-        corners = np.asarray(alignment["source_page_corners"], dtype=np.float32)
-        transform = np.asarray(alignment["source_to_canonical"], dtype=np.float64)
-        polygon = cv2.perspectiveTransform(corners[None], transform)[0]
+    if "observed_polygon_canonical_px" in alignment:
+        # Never generate onto unknown/missing paper, including PDF CropBox regions.
+        polygon = np.asarray(alignment["observed_polygon_canonical_px"], dtype=np.float32)
         footprint = np.zeros(layout.image_shape, dtype=np.uint8)
         cv2.fillConvexPoly(footprint, np.rint(polygon).astype(np.int32), 255)
+        radius = ceil(effective_masking_config.effective_clearance_mm * max(
+            layout.raster_width_px/layout.page_width_mm, layout.raster_height_px/layout.page_height_mm))
+        if radius > 0:
+            footprint = cv2.erode(footprint, np.ones((2*radius+1, 2*radius+1), np.uint8),
+                                  borderType=cv2.BORDER_CONSTANT, borderValue=0)
         # Validate the caller's mask before intersection; don't coerce malformed input.
         require_binary_mask(allowed_region_mask, layout.image_shape, "allowed_region_mask")
         allowed_region_mask = cv2.bitwise_and(allowed_region_mask, footprint)
@@ -283,6 +290,7 @@ def run_offline_document(
             run.suggested_candidate,
             approved=False,
             exported_paths={"toner_png": None, "a4_pdf": None},
+            alignment=alignment,
         ),
     )
     return run
@@ -306,6 +314,7 @@ def _write_toner_outputs(
     mask: np.ndarray,
     output_dir: Path,
     layout: A4CalibrationLayout,
+    correction_mm: np.ndarray | None = None,
 ) -> tuple[Path, Path]:
     if not (
         isclose(layout.page_width_mm, 210.0, abs_tol=1e-9)
@@ -313,6 +322,19 @@ def _write_toner_outputs(
     ):
         raise ValueError("print export requires a 210 x 297 mm A4 layout")
     toner = _toner_raster(mask, layout)
+    if correction_mm is not None:
+        # Transform in physical mm, then rasterize once. Never modify the source
+        # preview or its protection mask to compensate for printer mechanics.
+        S = np.diag([layout.raster_width_px/210, layout.raster_height_px/297, 1.])
+        H = S @ correction_mm @ np.linalg.inv(S)
+        yy, xx = np.nonzero(mask)
+        if len(xx):
+            points = np.column_stack([xx, yy]).astype(np.float64)[None]
+            shifted = cv2.perspectiveTransform(points, H)[0]
+            if np.any(shifted < 0) or np.any(shifted >= [layout.raster_width_px-1, layout.raster_height_px-1]):
+                raise ValueError("printer correction would clip new ink at the page edge")
+        toner = cv2.warpPerspective(toner, H, (layout.raster_width_px, layout.raster_height_px),
+                                    flags=cv2.INTER_NEAREST, borderValue=255)
     output_dir.mkdir(parents=True, exist_ok=True)
     png_path = output_dir / "approved_toner_only.png"
     Image.fromarray(toner, mode="L").save(png_path, dpi=(layout.dpi, layout.dpi))
@@ -333,7 +355,8 @@ def _write_toner_outputs(
     return png_path, pdf_path
 
 
-def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool) -> ApprovedExport:
+def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
+                       printer_profile: dict[str, Any] | None = None) -> ApprovedExport:
     """Export only an explicitly approved, ranked, non-simulated sanitized mask."""
     if not approved:
         raise PermissionError("explicit user approval is required before export")
@@ -347,11 +370,39 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool) -> Appro
         raise ValueError("candidate validation is missing, rejected, or simulated")
     if attempt.sanitized_new_ink_mask is None:
         raise ValueError("candidate has no sanitized new-ink mask")
+    if not run.alignment.get("registration", {}).get("export_allowed", False):
+        raise ValueError("preview only: confirm physical scale and paper origin before exporting onto the original sheet")
     layout = run.generation.config.layout
+    correction = None
+    if printer_profile is not None:
+        from printgpt_alignment.printer_calibration import validated_correction
+        correction = validated_correction(printer_profile)
+        # A measured profile does not make an unmeasured source error disappear.
+        source_bound = run.alignment["registration"].get("measured_source_accuracy_mm")
+        from printgpt_alignment.printer_calibration import fit_printer, validate_printer
+        printer_profile = validate_printer(fit_printer(printer_profile["calibration_record"]),
+                                          printer_profile["validation_record"],
+                                          tolerance_mm=printer_profile.get("tolerance_mm", .5))
+        printer_bound = printer_profile["validation"]["max_error_mm"] + printer_profile["measurement_uncertainty_mm"]
+        raster_bound = float(np.hypot(210/layout.raster_width_px, 297/layout.raster_height_px))
+        total_bound = None if source_bound is None else source_bound + printer_bound + raster_bound
+        if total_bound is not None and total_bound >= run.masks.config["effective_clearance_mm"]:
+            raise ValueError("combined source/printer/raster error exceeds ink protection clearance; increase clearance and regenerate")
+        printer_profile = dict(printer_profile, correction_applied=True,
+                               observed_combined_error_bound_mm=total_bound,
+                               protection_budget="unverified source accuracy" if total_bound is None else "within configured clearance on measured samples")
+        yy, xx = np.nonzero(attempt.sanitized_new_ink_mask)
+        if len(xx):
+            intended = np.column_stack([xx*210/layout.raster_width_px, yy*297/layout.raster_height_px, np.ones(len(xx))])
+            commanded = intended @ correction[:2].T
+            left, top, right, bottom = printer_profile["safe_margins_mm"]
+            if np.any(commanded < [left,top]) or np.any(commanded > [210-right,297-bottom]):
+                raise ValueError("corrected ink falls inside measured printer margins; reduce the allowed region and regenerate")
     png_path, pdf_path = _write_toner_outputs(
         attempt.sanitized_new_ink_mask,
         run.output_dir / "print",
         layout,
+        correction,
     )
     exported = {
         "toner_png": png_path.relative_to(run.output_dir).as_posix(),
@@ -359,6 +410,7 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool) -> Appro
     }
     _write_json(
         run.manifest_path,
-        _manifest_payload(run.generation, selected, approved=True, exported_paths=exported),
+        _manifest_payload(run.generation, selected, approved=True, exported_paths=exported,
+                          alignment=run.alignment, printer=printer_profile),
     )
     return ApprovedExport(selected.candidate_id, selected.attempt_id, png_path, pdf_path, run.manifest_path)

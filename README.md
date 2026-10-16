@@ -44,10 +44,19 @@ Print the PDF at **100% / Actual Size** with Fit, Shrink, borderless expansion,
 and automatic rotation disabled. See [`docs/mvp.md`](docs/mvp.md) for the
 end-to-end contract and physical-printer limitations.
 
-The next physical-registration task is specified in
-[`docs/PHYSICAL_ALIGNMENT_HANDOFF.md`](docs/PHYSICAL_ALIGNMENT_HANDOFF.md).
+Fitting alone is now **preview-only**: exporting onto the original sheet requires
+confirmed physical geometry (or the known ArUco layout). PDF boxes/rotation and
+scanner DPI are retained; complete-page, corner and measured-crop corrections
+are available. Printer accuracy remains unmeasured until physically tested.
+See [`docs/PHYSICAL_ALIGNMENT.md`](docs/PHYSICAL_ALIGNMENT.md) for the coordinate
+contract, Canon 2425i calibration procedure and independent-point checks.
 
 ## Guided notebook
+
+Open [`notebooks/04_physical_alignment.ipynb`](notebooks/04_physical_alignment.ipynb)
+for the new marker-free geometry benchmark, visual overlays, source-coordinate
+inspection, manual corrections and printable measurement target. Existing
+notebooks have been preserved.
 
 Open [`notebooks/03_mvp_agentic_system.ipynb`](notebooks/03_mvp_agentic_system.ipynb)
 for the executed, visual explanation of the complete agentic MVP. It shows the

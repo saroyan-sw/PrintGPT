@@ -10,8 +10,8 @@ import cv2
 
 from .benchmark import run_benchmark
 from .calibration_page import write_calibration_pdf, write_calibration_png
-from .detection import detect_and_rectify_document
-from .document import load_document_page
+from .document import load_document
+from .registration import RegistrationOptions, register_document
 from .geometry import DEFAULT_LAYOUT
 from .synthetic import generate_synthetic_benchmark
 from .smartdoc import prepare_smartdoc_benchmark
@@ -39,6 +39,7 @@ def build_parser() -> ArgumentParser:
     rectify.add_argument("--output", type=Path, required=True, help="output raster image path")
     rectify.add_argument("--report", type=Path)
     rectify.add_argument("--input-kind", choices=["auto", "scan", "photo"], default="auto")
+    rectify.add_argument("--registration", type=Path, help="JSON RegistrationOptions; default is preview-only without usable markers")
 
     generate = subparsers.add_parser("generate", help="generate deterministic synthetic cases")
     generate.add_argument("--output-dir", type=Path, default=Path("artifacts/synthetic"))
@@ -74,17 +75,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.page < 1:
             raise SystemExit("--page must be 1 or greater")
         try:
-            image = load_document_page(
+            page = load_document(
                 args.input,
                 page_index=args.page - 1,
                 dpi=args.dpi,
             )
         except (FileNotFoundError, IndexError, ValueError) as exc:
             raise SystemExit(str(exc)) from exc
-        result = detect_and_rectify_document(image, input_kind=args.input_kind)
+        options = RegistrationOptions(**json.loads(args.registration.read_text(encoding="utf-8"))) if args.registration else None
+        try:
+            warped, report = register_document(page, input_kind=args.input_kind, options=options)
+        except ValueError as exc:
+            print(f"rejected: {exc}")
+            return 2
         if args.report:
             args.report.parent.mkdir(parents=True, exist_ok=True)
-            report = result.to_dict()
             report.update(
                 {
                     "input": str(args.input),
@@ -93,13 +98,10 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        if not result.accepted or result.warped is None:
-            print(f"rejected: {result.reason}")
-            return 2
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(args.output), result.warped):
+        if not cv2.imwrite(str(args.output), warped):
             raise SystemExit(f"could not write {args.output}")
-        print(f"accepted confidence={result.confidence:.3f} orientation={result.orientation_degrees}")
+        print(f"accepted: {report['registration']['status']} (printer accuracy unmeasured)")
         return 0
     if args.command == "generate":
         print(generate_synthetic_benchmark(args.output_dir, count=args.count, seed=args.seed, scan_paths=_scan_paths(args.scan_dir)))
