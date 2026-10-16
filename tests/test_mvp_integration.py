@@ -10,6 +10,7 @@ from printgpt_alignment.calibration_page import render_calibration_image
 from printgpt_alignment.geometry import A4CalibrationLayout, mm_to_px
 from printgpt_generation.models import AttemptStatus, RunStatus
 from printgpt_mvp import (
+    InputMode,
     approve_and_export,
     canonicalize_document,
     rectangular_allowed_region,
@@ -39,7 +40,15 @@ def offline_run(tmp_path_factory: pytest.TempPathFactory):
         height_mm=180,
         layout=LAYOUT,
     )
-    return run_offline_document(input_path, allowed, root / "run", seed=7, layout=LAYOUT)
+    return run_offline_document(
+        input_path,
+        allowed,
+        root / "run",
+        seed=7,
+        layout=LAYOUT,
+        input_mode=InputMode.MARKED_PAGE,
+        normalization_confirmed=True,
+    )
 
 
 def test_offline_end_to_end_uses_real_masks_validation_and_sanitized_previews(offline_run) -> None:
@@ -72,6 +81,9 @@ def test_candidate_selection_uses_ranked_validated_attempts(offline_run) -> None
     assert manifest["validation"]["accepted"] is True
     assert manifest["approved"] is False
     assert manifest["exported_paths"] == {"a4_pdf": None, "toner_png": None}
+    assert manifest["input_normalization"]["input_mode"] == "marked_page"
+    assert manifest["input_normalization"]["marker_calibration_used"] is True
+    assert len(manifest["input_normalization"]["applied_transform"]["matrix"]) == 3
 
 
 def test_approval_gate_rejects_missing_approval_and_unranked_attempt(offline_run) -> None:
@@ -144,35 +156,53 @@ def test_mvp_canonicalizes_unmarked_full_frame_scan(tmp_path) -> None:
     input_path = tmp_path / "ordinary_scan.png"
     assert cv2.imwrite(str(input_path), page)
 
-    canonical, report = canonicalize_document(input_path, layout=LAYOUT)
+    canonical, report = canonicalize_document(
+        input_path, layout=LAYOUT, input_mode=InputMode.SCANNER_A4
+    )
 
     assert canonical.shape == (*LAYOUT.image_shape, 3)
     assert report["accepted"] is True
-    assert report["alignment_method"] == "scan_frame"
+    assert report["input_mode"] == "scanner_a4"
+    assert report["marker_calibration_used"] is False
 
 
-def test_mvp_bad_scan_error_tells_user_to_scan_again(tmp_path) -> None:
+def test_mvp_non_a4_scan_is_rejected_without_calibrated_coordinates(tmp_path) -> None:
     input_path = tmp_path / "bad_scan.png"
-    assert cv2.imwrite(str(input_path), np.full((*LAYOUT.image_shape, 3), 245, dtype=np.uint8))
-    with pytest.raises(ValueError, match="scan again"):
-        canonicalize_document(input_path, layout=LAYOUT)
+    assert cv2.imwrite(str(input_path), np.full((400, 400, 3), 245, dtype=np.uint8))
+    with pytest.raises(ValueError, match="No calibrated physical coordinates"):
+        canonicalize_document(input_path, layout=LAYOUT, input_mode=InputMode.SCANNER_A4)
 
 
-def test_non_a4_scan_runs_through_generation_and_excludes_padding(tmp_path):
+def test_non_a4_scan_does_not_run_generation(tmp_path):
     page = np.full((1000, 802, 3), 255, dtype=np.uint8)
     cv2.putText(page, "Scanner export", (100, 180), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 3)
     cv2.rectangle(page, (70, 260), (700, 800), (0, 0, 0), 3)
     path = tmp_path / "scan.png"
     assert cv2.imwrite(str(path), page)
     allowed = np.full(LAYOUT.image_shape, 255, dtype=np.uint8)
-    run = run_offline_document(path, allowed, tmp_path / "run", layout=LAYOUT)
-    assert run.alignment["alignment_method"] == "scan_frame"
-    assert run.alignment["warnings"]
-    assert len(run.candidates) == 2
-    assert not np.any(run.masks.layout_exclusion_mask)
-    assert not np.any(run.masks.allowed_region_mask[:40])
-    assert np.all(allowed == 255)  # Caller-owned region was not mutated.
-    assert (run.output_dir / "alignment.json").is_file()
-    assert not (run.output_dir / "print").exists()
-    for candidate in run.candidates:
-        assert not np.any(candidate.attempt.sanitized_new_ink_mask[:40])
+    with pytest.raises(ValueError, match="recognizable full-page A4"):
+        run_offline_document(
+            path,
+            allowed,
+            tmp_path / "run",
+            layout=LAYOUT,
+            input_mode=InputMode.SCANNER_A4,
+            normalization_confirmed=True,
+        )
+    assert np.all(allowed == 255)
+
+
+def test_generation_requires_normalized_preview_confirmation(tmp_path):
+    page = render_calibration_image(LAYOUT)
+    path = tmp_path / "marked.png"
+    assert cv2.imwrite(str(path), page)
+    allowed = np.full(LAYOUT.image_shape, 255, dtype=np.uint8)
+    with pytest.raises(PermissionError, match="preview confirmation"):
+        run_offline_document(
+            path,
+            allowed,
+            tmp_path / "run",
+            layout=LAYOUT,
+            input_mode=InputMode.MARKED_PAGE,
+            normalization_confirmed=False,
+        )

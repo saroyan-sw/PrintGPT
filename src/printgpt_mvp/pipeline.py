@@ -18,12 +18,9 @@ from reportlab.pdfgen import canvas
 from printgpt_alignment import (
     A4CalibrationLayout,
     DEFAULT_LAYOUT,
-    detect_and_rectify_document,
-    load_document_page,
     mm_to_px,
 )
 from printgpt_contracts import MaskBundle, MaskingConfig, ValidationConfig
-from printgpt_alignment.detection import InputKind
 from printgpt_generation import GenerationConfig, create_generation_request, run_generation, write_run_record
 from printgpt_generation.doubles import (
     CriticScript,
@@ -38,12 +35,19 @@ from printgpt_generation.requests import GenerationRunResult
 from printgpt_generation.track_a import TrackAValidator
 from printgpt_masking import build_masks
 
+from .input_normalization import (
+    InputMode,
+    InputNormalizationResult,
+    OrientationChoice,
+    normalize_document_input,
+)
+
 
 PRINT_AT_ACTUAL_SIZE = (
     "Print this PDF at 100% or Actual Size. Disable Fit, Shrink, Scale to Fit, "
     "borderless expansion, and automatic rotation."
 )
-_MANIFEST_SCHEMA = "printgpt-mvp-run/1"
+_MANIFEST_SCHEMA = "printgpt-mvp-run/2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +70,7 @@ class MvpRun:
     canonical_page_rgb: np.ndarray
     masks: MaskBundle
     generation: GenerationRunResult
+    normalization: InputNormalizationResult
     alignment: dict[str, Any]
     generation_record_path: Path
     manifest_path: Path
@@ -102,42 +107,27 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _rgb_from_alignment(warped: np.ndarray) -> np.ndarray:
-    if warped.ndim == 2:
-        rgb = cv2.cvtColor(warped, cv2.COLOR_GRAY2RGB)
-    elif warped.ndim == 3 and warped.shape[2] == 3:
-        rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-    elif warped.ndim == 3 and warped.shape[2] == 4:
-        rgb = cv2.cvtColor(warped, cv2.COLOR_BGRA2RGB)
-    else:
-        raise ValueError(f"unsupported aligned image shape: {warped.shape}")
-    if rgb.dtype != np.uint8:
-        raise ValueError(f"aligned image must have dtype uint8, got {rgb.dtype}")
-    return np.ascontiguousarray(rgb)
-
-
 def canonicalize_document(
     input_path: str | Path,
     *,
     page_index: int = 0,
     layout: A4CalibrationLayout = DEFAULT_LAYOUT,
-    input_kind: InputKind = "auto",
+    input_mode: InputMode | str = InputMode.MARKED_PAGE,
+    orientation: OrientationChoice | str = OrientationChoice.AUTO,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Load one supported image/PDF page, rectify it, and convert BGR to RGB once."""
+    """Compatibility wrapper returning the canonical image and normalization metadata."""
     path = Path(input_path)
-    source = load_document_page(path, page_index=page_index, dpi=layout.dpi)
-    detection = detect_and_rectify_document(source, layout, input_kind=input_kind)
-    if not detection.accepted or detection.warped is None:
-        raise ValueError(f"page alignment rejected: {detection.reason}")
-    canonical = _rgb_from_alignment(detection.warped)
-    expected = (*layout.image_shape, 3)
-    if canonical.shape != expected:
-        raise ValueError(f"aligned page must have shape {expected}, got {canonical.shape}")
-    report = detection.to_dict()
+    result = normalize_document_input(
+        path,
+        page_index=page_index,
+        layout=layout,
+        input_mode=input_mode,
+        orientation=orientation,
+    )
+    canonical = result.canonical_rgb
+    report = result.to_metadata()
     report["input_path"] = str(path)
     report["page_index"] = page_index
-    report["canonical_colour_space"] = "RGB"
-    report["input_kind"] = input_kind
     return canonical, report
 
 
@@ -185,6 +175,7 @@ def _offline_dependencies(config: GenerationConfig, validation: ValidationConfig
 def _manifest_payload(
     generation: GenerationRunResult,
     selected: CandidateView | None,
+    normalization: InputNormalizationResult,
     *,
     approved: bool,
     exported_paths: dict[str, str | None],
@@ -193,6 +184,7 @@ def _manifest_payload(
     return {
         "schema_version": _MANIFEST_SCHEMA,
         "generation_run_id": generation.run_id,
+        "input_normalization": normalization.to_metadata(),
         "status": generation.outcome.status.value,
         "selected_candidate": None
         if selected is None
@@ -227,29 +219,47 @@ def run_offline_document(
     layout: A4CalibrationLayout = DEFAULT_LAYOUT,
     masking_config: MaskingConfig = MaskingConfig(),
     validation_config: ValidationConfig = ValidationConfig(),
-    input_kind: InputKind = "auto",
+    input_mode: InputMode | str = InputMode.MARKED_PAGE,
+    orientation: OrientationChoice | str = OrientationChoice.AUTO,
+    normalization_result: InputNormalizationResult | None = None,
+    normalization_confirmed: bool = False,
 ) -> MvpRun:
     """Run alignment, masking, generation, validation, criticism, and selection offline."""
+    if not normalization_confirmed:
+        raise PermissionError("normalized page preview confirmation is required before generation")
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
-    canonical, alignment = canonicalize_document(
-        input_path, page_index=page_index, layout=layout, input_kind=input_kind
+    normalization = normalization_result or normalize_document_input(
+        input_path,
+        page_index=page_index,
+        layout=layout,
+        input_mode=input_mode,
+        orientation=orientation,
     )
+    if normalization.input_mode is not InputMode(input_mode):
+        raise ValueError("normalization result input mode does not match the requested mode")
+    if normalization.canonical_dimensions != layout.raster_size_px:
+        raise ValueError("normalization result canonical dimensions do not match the layout")
+    canonical = normalization.canonical_rgb
+    alignment = normalization.to_metadata()
+    alignment["input_path"] = str(Path(input_path))
+    alignment["page_index"] = page_index
     _write_json(root / "alignment.json", alignment)
     effective_masking_config = masking_config
-    if alignment.get("alignment_method") in ("page_boundary", "scan_frame") and not (
-        set(alignment.get("detected_ids", ())) & set(layout.expected_marker_ids)
-    ):
+    if not normalization.marker_calibration_used:
         effective_masking_config = replace(
             masking_config,
             exclude_calibration_markers=False,
             exclude_calibration_labels=False,
             layout_guide_clearance_mm=0.0,
         )
-    if alignment.get("alignment_method") == "scan_frame":
-        # Letterboxing is not part of the original document or an allowed area.
-        corners = np.asarray(alignment["source_page_corners"], dtype=np.float32)
-        transform = np.asarray(alignment["source_to_canonical"], dtype=np.float64)
+    if not normalization.marker_calibration_used:
+        # Padding introduced by an orientation override is never an allowed area.
+        width, height = normalization.source_pixel_dimensions
+        corners = np.asarray(
+            [[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32
+        )
+        transform = np.asarray(normalization.applied_transform.matrix, dtype=np.float64)
         polygon = cv2.perspectiveTransform(corners[None], transform)[0]
         footprint = np.zeros(layout.image_shape, dtype=np.uint8)
         cv2.fillConvexPoly(footprint, np.rint(polygon).astype(np.int32), 255)
@@ -272,6 +282,7 @@ def run_offline_document(
         canonical_page_rgb=canonical,
         masks=masks,
         generation=generation,
+        normalization=normalization,
         alignment=alignment,
         generation_record_path=generation_record,
         manifest_path=root / "mvp_manifest.json",
@@ -281,6 +292,7 @@ def run_offline_document(
         _manifest_payload(
             generation,
             run.suggested_candidate,
+            normalization,
             approved=False,
             exported_paths={"toner_png": None, "a4_pdf": None},
         ),
@@ -359,6 +371,12 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool) -> Appro
     }
     _write_json(
         run.manifest_path,
-        _manifest_payload(run.generation, selected, approved=True, exported_paths=exported),
+        _manifest_payload(
+            run.generation,
+            selected,
+            run.normalization,
+            approved=True,
+            exported_paths=exported,
+        ),
     )
     return ApprovedExport(selected.candidate_id, selected.attempt_id, png_path, pdf_path, run.manifest_path)

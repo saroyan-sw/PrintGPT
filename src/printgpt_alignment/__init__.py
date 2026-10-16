@@ -7,7 +7,7 @@ from .detection import (
     detect_and_rectify,
     detect_and_rectify_document,
 )
-from .document import load_document_page
+from .document import LoadedDocumentPage, load_document_page, load_document_page_info
 from .geometry import A4CalibrationLayout, DEFAULT_LAYOUT, mm_to_px, px_to_mm
 
 __all__ = [
@@ -15,10 +15,12 @@ __all__ = [
     "BoundaryThresholds",
     "DEFAULT_LAYOUT",
     "DetectionResult",
+    "LoadedDocumentPage",
     "QualityThresholds",
     "detect_and_rectify",
     "detect_and_rectify_document",
     "load_document_page",
+    "load_document_page_info",
     "mm_to_px",
     "px_to_mm",
 ]

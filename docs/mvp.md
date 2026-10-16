@@ -2,19 +2,41 @@
 
 ## Dependable path
 
-The MVP supports black line drawings on light A4 paper, with or without
-calibration markers. A supported raster image or PDF page is loaded and
-rectified by the alignment component. It prefers marker alignment, then uses
-the image bounds for scanner exports or detects the outer paper boundary for
-photographs. Scanner exports do not need A4 proportions or visible background.
-Non-A4 scans are fitted uniformly to the A4 canvas, with a warning about unknown
-physical size; added padding is excluded from the allowed completion region.
-The input-type control can explicitly select scan or photo handling. Low-contrast,
-low-resolution, or blurry scans request a rescan. Photographs with unclear or
-clipped page boundaries do too. A cropped scanner export cannot reveal what
-content is missing, so users must check completeness. The OpenCV result is converted from BGR
-to RGB exactly once. The user must define a rectangular allowed completion
-region; the rest of the page is never implicitly allowed.
+The MVP supports black line drawings on light A4 paper through two explicit
+input modes. It never falls back from one mode to the other.
+
+### Scanner A4
+
+This mode is for a flat, full-page A4 image or PDF from a scanner. The shared
+document loader renders PDFs at 300 DPI and records PDF page size and rotation
+metadata. A configurable tolerance checks the physical dimensions when present,
+the A4 aspect ratio, and the expected 300 DPI raster dimensions. Auto keeps a
+portrait scan unchanged and applies the Canon imageRUNNER profile's 90°
+counter-clockwise correction to landscape A4. The UI also offers left 90°,
+right 90°, 180°, and no-rotation overrides.
+
+After rotation, a correctly oriented page is normalized to exactly 2480 × 3508.
+Known one-pixel renderer differences are resized deterministically and recorded,
+including source/rotated/destination dimensions, scale factors, interpolation,
+the complete 3 × 3 transform, padding, and the fact that no crop occurred. A
+deliberately landscape override is fitted with white padding instead of being
+stretched or cropped. Non-A4 input is rejected and is not assigned calibrated
+physical coordinates. ArUco detection is bypassed only because the user chose
+Scanner A4.
+
+### Marked page
+
+This mode requires the expected ArUco marker quartet and retains the existing
+perspective rectification, confidence score, and canonical A4 transform. It is
+appropriate for marked calibration sheets and perspective-distorted captures.
+A marker failure is shown as a marker failure; it never silently enters the
+scanner path.
+
+Both modes show source dimensions, detected orientation, applied correction,
+warnings, and the normalized portrait A4 page. The user must explicitly confirm
+that preview before the allowed-region controls can start masking and generation.
+The source array is never mutated. The OpenCV result is converted from BGR to
+RGB exactly once.
 
 Track A detects existing ink, expands its protection clearance, and intersects
 the allowed area with printer margins and layout exclusions. The LangGraph
@@ -29,14 +51,16 @@ The integrated implementation is in `printgpt_mvp.pipeline`. It always uses
 `TrackAValidator`; simulated validation is rejected at export. Generation
 records and diagnostic images are saved under the run directory. A small
 `mvp_manifest.json` records the selected attempt, validation result, approval
-state, and export paths. `alignment.json` records the input mode, chosen method,
-transform, quality measurements, and physical-size warnings.
+state, export paths, and complete input-normalization metadata. `alignment.json`
+records the same mode, source dimensions, selected rotation, confidence,
+calibration status, warnings, and transform.
 
 The alignment notebook's synthetic and SmartDoc benchmarks intentionally use
 `detect_and_rectify`, the strict marker detector. Their setup overlays a
 calibration layout onto the source documents; they do not measure raw unmarked
 scan acceptance. App uploads and the CLI use `detect_and_rectify_document`,
-which retains the same marker implementation and adds the two unmarked paths.
+which retains the lower-level marker implementation and its legacy exploratory
+unmarked paths. The MVP web interface does not use those fallback paths.
 
 ## Integration failures found and fixed
 
@@ -92,6 +116,9 @@ model or printer.
 - The offline generator and critic demonstrate integration, not semantic model
   quality. The live Gemini adapter remains a separate verification task and a
   failed live provider must not prevent the offline demonstration.
+- Scanner A4 normalization establishes a canonical digital A4 coordinate system,
+  not physical printer registration. Feed offset, scale, skew, printable margins,
+  and run-to-run variation still require a measured printer calibration profile.
 - Existing-ink detection is tuned for dark line art on light paper. Shadows,
   coloured paper, halftones, and very faint pencil may require threshold tuning.
 - Digital clearance cannot compensate for printer feed or duplex registration

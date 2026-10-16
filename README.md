@@ -26,20 +26,25 @@ Run the approval interface:
 python -m streamlit run src/printgpt_mvp/streamlit_app.py
 ```
 
-The interface accepts a supported image or PDF with or without calibration
-markers, requires an explicit allowed completion rectangle, displays both model candidates and the actual sanitized
+The interface has two explicit, non-fallback input modes:
+
+- **Scanner A4** is for a flat, full-page A4 scan rendered at 300 DPI. It accepts
+  portrait or landscape A4 within documented tolerances, provides Auto plus four
+  manual rotation choices, normalizes deterministically to 2480 × 3508 without
+  silently cropping, and requires confirmation of the corrected page preview.
+  Auto applies the Canon imageRUNNER landscape profile (90° counter-clockwise).
+- **Marked page (ArUco)** preserves the perspective-correction path for marked
+  calibration sheets and photographs. All four expected markers are required;
+  failed marker detection never switches to Scanner A4 mode.
+
+The interface requires an explicit allowed completion rectangle, displays both model candidates and the actual sanitized
 print previews, and creates no printable output until the user approves an
 eligible candidate. The export is a toner-only PNG and a 210 × 297 mm PDF.
-Markers are used when available. Otherwise, Automatic mode recognizes scanner
-exports where light paper reaches the image borders, including ordinary scan
-proportions and narrow scanner bars. These scans need no external page outline.
-Photographs use a visible paper boundary. Choose **Scanned page** to explicitly
-use the full image, or **Photo of a page** to require boundary detection.
-Blurry, too faint, or undersized scans still request a rescan. An image whose
-proportions differ from A4 is fitted without stretching; the app explains that
-its physical size is unknown and alignment on the original sheet is not assured.
-Missing content cannot be recovered or reliably identified from an already
-cropped scanner export. Verify that the full original page is present.
+The offline interface visibly uses deterministic generator and critic doubles;
+it does not claim to make live Gemini calls. A non-A4 image is rejected in
+Scanner A4 mode rather than being assigned calibrated physical coordinates.
+Missing or cropped content cannot be recovered, so verify that the entire
+original page is present in the normalized preview.
 Print the PDF at **100% / Actual Size** with Fit, Shrink, borderless expansion,
 and automatic rotation disabled. See [`docs/mvp.md`](docs/mvp.md) for the
 end-to-end contract and physical-printer limitations.
@@ -80,9 +85,9 @@ notebook dependencies in a fresh environment:
 .\.venv\Scripts\python.exe -m printgpt_alignment smartdoc C:\path\to\sampleDataset.tar.gz
 ```
 
-PDF input is rendered to pixels at the requested DPI before alignment. ArUco
-markers are preferred, followed by scan-frame or photograph-boundary alignment.
-The CLI has the same `--input-kind auto|scan|photo` options as the interface.
+PDF input is rendered to pixels at the requested DPI before alignment. The
+legacy alignment CLI still exposes its lower-level `--input-kind auto|scan|photo`
+options; the MVP web interface instead uses the two explicit modes above.
 The default is 300 DPI, matching the canonical 2480 × 3508 A4 coordinate
 system. `--page` is 1-based and defaults to the first page. Rectified output is
 a raster image because OpenCV's alignment calculations operate on pixels.
