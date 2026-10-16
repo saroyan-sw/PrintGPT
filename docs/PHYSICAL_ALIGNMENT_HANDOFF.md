@@ -44,7 +44,7 @@ marker alignment. Do not reintroduce that rejection of ordinary scans.
 - `src/printgpt_mvp/pipeline.py`: canonicalization, masks, generation, approval,
   and toner-only A4 export. Added canvas padding is excluded from the allowed
   region. `alignment.json` saves the chosen method, transform, and warnings.
-- `src/printgpt_mvp/streamlit_app.py`: Automatic / Scanned page / Photo input
+- `src/printgpt_mvp/streamlit_app.py`: explicit Scanner A4 / Marked page input modes
   modes. Input changes and failed runs clear previous previews and exports.
 - The generator and critic are deterministic demonstration providers. The
   isolated diagonal line in the preview is a scripted sample addition, not a

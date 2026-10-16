@@ -44,7 +44,7 @@ PRINT_AT_ACTUAL_SIZE = (
     "Print this PDF at 100% or Actual Size. Disable Fit, Shrink, Scale to Fit, "
     "borderless expansion, and automatic rotation."
 )
-_MANIFEST_SCHEMA = "printgpt-mvp-run/1"
+_MANIFEST_SCHEMA = "printgpt-mvp-run/2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +67,7 @@ class MvpRun:
     canonical_page_rgb: np.ndarray
     masks: MaskBundle
     generation: GenerationRunResult
+    normalization: InputNormalizationResult
     alignment: dict[str, Any]
     generation_record_path: Path
     manifest_path: Path
@@ -103,20 +104,6 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _rgb_from_alignment(warped: np.ndarray) -> np.ndarray:
-    if warped.ndim == 2:
-        rgb = cv2.cvtColor(warped, cv2.COLOR_GRAY2RGB)
-    elif warped.ndim == 3 and warped.shape[2] == 3:
-        rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-    elif warped.ndim == 3 and warped.shape[2] == 4:
-        rgb = cv2.cvtColor(warped, cv2.COLOR_BGRA2RGB)
-    else:
-        raise ValueError(f"unsupported aligned image shape: {warped.shape}")
-    if rgb.dtype != np.uint8:
-        raise ValueError(f"aligned image must have dtype uint8, got {rgb.dtype}")
-    return np.ascontiguousarray(rgb)
-
-
 def canonicalize_document(
     input_path: str | Path,
     *,
@@ -125,7 +112,7 @@ def canonicalize_document(
     input_kind: InputKind = "auto",
     registration: RegistrationOptions | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Load one supported image/PDF page, rectify it, and convert BGR to RGB once."""
+    """Compatibility wrapper returning the canonical image and normalization metadata."""
     path = Path(input_path)
     source = load_document(path, page_index=page_index, dpi=layout.dpi)
     warped, report = register_document(source, layout=layout, input_kind=input_kind, options=registration)
@@ -135,8 +122,6 @@ def canonicalize_document(
         raise ValueError(f"aligned page must have shape {expected}, got {canonical.shape}")
     report["input_path"] = str(path)
     report["page_index"] = page_index
-    report["canonical_colour_space"] = "RGB"
-    report["input_kind"] = input_kind
     return canonical, report
 
 
@@ -185,6 +170,7 @@ def _offline_dependencies(config: GenerationConfig, validation: ValidationConfig
 def _manifest_payload(
     generation: GenerationRunResult,
     selected: CandidateView | None,
+    normalization: InputNormalizationResult,
     *,
     approved: bool,
     exported_paths: dict[str, str | None],
@@ -195,6 +181,7 @@ def _manifest_payload(
     return {
         "schema_version": _MANIFEST_SCHEMA,
         "generation_run_id": generation.run_id,
+        "input_normalization": normalization.to_metadata(),
         "status": generation.outcome.status.value,
         "selected_candidate": None
         if selected is None
@@ -236,11 +223,21 @@ def run_offline_document(
     registration: RegistrationOptions | None = None,
 ) -> MvpRun:
     """Run alignment, masking, generation, validation, criticism, and selection offline."""
+    if not normalization_confirmed:
+        raise PermissionError("normalized page preview confirmation is required before generation")
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
     canonical, alignment = canonicalize_document(
         input_path, page_index=page_index, layout=layout, input_kind=input_kind, registration=registration
     )
+    if normalization.input_mode is not InputMode(input_mode):
+        raise ValueError("normalization result input mode does not match the requested mode")
+    if normalization.canonical_dimensions != layout.raster_size_px:
+        raise ValueError("normalization result canonical dimensions do not match the layout")
+    canonical = normalization.canonical_rgb
+    alignment = normalization.to_metadata()
+    alignment["input_path"] = str(Path(input_path))
+    alignment["page_index"] = page_index
     _write_json(root / "alignment.json", alignment)
     effective_masking_config = masking_config
     if alignment.get("alignment_method") != "aruco" and not (
@@ -281,6 +278,7 @@ def run_offline_document(
         canonical_page_rgb=canonical,
         masks=masks,
         generation=generation,
+        normalization=normalization,
         alignment=alignment,
         generation_record_path=generation_record,
         manifest_path=root / "mvp_manifest.json",
@@ -290,6 +288,7 @@ def run_offline_document(
         _manifest_payload(
             generation,
             run.suggested_candidate,
+            normalization,
             approved=False,
             exported_paths={"toner_png": None, "a4_pdf": None},
             alignment=alignment,

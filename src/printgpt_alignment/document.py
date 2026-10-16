@@ -11,7 +11,19 @@ import pypdfium2 as pdfium
 from PIL import Image, ImageOps
 from pypdf import PdfReader
 
-from .geometry import DEFAULT_DPI
+from .geometry import DEFAULT_DPI, MM_PER_INCH
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class LoadedDocumentPage:
+    """Rendered page pixels plus trustworthy source geometry when available."""
+
+    pixels: np.ndarray
+    pixel_dimensions: tuple[int, int]
+    physical_dimensions_mm: tuple[float, float] | None
+    source_dpi: tuple[float, float] | None
+    pdf_rotation_degrees: int | None
+    is_pdf: bool
 
 
 @dataclass(frozen=True)

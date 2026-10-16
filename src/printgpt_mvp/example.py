@@ -11,6 +11,7 @@ from printgpt_alignment import DEFAULT_LAYOUT, mm_to_px
 from printgpt_alignment.calibration_page import render_calibration_image
 
 from .pipeline import approve_and_export, rectangular_allowed_region, run_offline_document
+from .input_normalization import InputMode
 
 
 def _px(value_mm: float) -> int:
@@ -33,7 +34,15 @@ def run_example(output_dir: Path) -> Path:
     root = Path(output_dir)
     input_path = write_demo_scan(root / "input" / "unfinished_a4_scan.png")
     allowed = rectangular_allowed_region(x_mm=40, y_mm=60, width_mm=130, height_mm=180)
-    run = run_offline_document(input_path, allowed, root / "run", user_prompt="", seed=7)
+    run = run_offline_document(
+        input_path,
+        allowed,
+        root / "run",
+        user_prompt="",
+        seed=7,
+        input_mode=InputMode.MARKED_PAGE,
+        normalization_confirmed=True,
+    )
     selected = run.suggested_candidate
     if selected is None:
         raise RuntimeError("offline demonstration produced no valid candidate")
