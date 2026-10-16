@@ -12,6 +12,7 @@ from printgpt_alignment import DEFAULT_LAYOUT
 from printgpt_alignment.document import load_document
 from printgpt_alignment.registration import RegistrationOptions
 
+from printgpt_mvp.hardware_panel import render_hardware_panel
 from printgpt_mvp.pipeline import (
     PRINT_AT_ACTUAL_SIZE,
     MvpRun,
@@ -139,6 +140,7 @@ def main() -> None:
 
     run = st.session_state.get("mvp_run")
     if not isinstance(run, MvpRun):
+        render_hardware_panel(st, None)
         return
     if run.alignment.get("alignment_method") == "scan_frame":
         st.info("The full scan was fitted for preview. Its image bounds have not been established as physical paper edges.")
@@ -241,6 +243,7 @@ def main() -> None:
             file_name=exported.toner_png_path.name,
             mime="image/png",
         )
+    render_hardware_panel(st, exported)
 
 
 if __name__ == "__main__":

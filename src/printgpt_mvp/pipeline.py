@@ -37,6 +37,8 @@ from printgpt_generation.requests import GenerationRunResult
 from printgpt_generation.track_a import TrackAValidator
 from printgpt_masking import build_masks
 
+from .print_approval import write_print_approval
+
 
 PRINT_AT_ACTUAL_SIZE = (
     "Print this PDF at 100% or Actual Size. Disable Fit, Shrink, Scale to Fit, "
@@ -412,5 +414,26 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
         run.manifest_path,
         _manifest_payload(run.generation, selected, approved=True, exported_paths=exported,
                           alignment=run.alignment, printer=printer_profile),
+    )
+    registration = run.alignment.get("registration") or {}
+    write_print_approval(
+        run_dir=run.output_dir,
+        run_id=run.generation.run_id,
+        candidate_id=selected.candidate_id,
+        attempt_id=selected.attempt_id,
+        toner_png=png_path,
+        a4_pdf=pdf_path,
+        validation={
+            "accepted": attempt.validation.accepted,
+            "simulated": attempt.validation.simulated,
+            "reasons": list(attempt.validation.reasons),
+        },
+        input_mode={
+            "input_kind": run.alignment.get("input_kind"),
+            "alignment_method": run.alignment.get("alignment_method"),
+            "registration_status": registration.get("status"),
+            "registration_mode": (registration.get("options") or {}).get("mode"),
+        },
+        printer_correction_applied=correction is not None,
     )
     return ApprovedExport(selected.candidate_id, selected.attempt_id, png_path, pdf_path, run.manifest_path)

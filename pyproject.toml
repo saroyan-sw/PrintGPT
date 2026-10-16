@@ -30,10 +30,15 @@ app = [
 gemini = [
     "google-genai==2.31.0",
 ]
+hardware = [
+    "mcp==2.3.0",
+    "pywin32>=306; sys_platform == 'win32'",
+]
 
 [project.scripts]
 printgpt-align = "printgpt_alignment.cli:main"
 printgpt-mvp-demo = "printgpt_mvp.example:main"
+printgpt-hardware-mcp = "printgpt_hardware_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

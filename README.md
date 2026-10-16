@@ -51,6 +51,15 @@ are available. Printer accuracy remains unmeasured until physically tested.
 See [`docs/PHYSICAL_ALIGNMENT.md`](docs/PHYSICAL_ALIGNMENT.md) for the coordinate
 contract, Canon 2425i calibration procedure and independent-point checks.
 
+## Canon printer and scanner (local MCP server)
+
+`printgpt_hardware_mcp` is a local stdio MCP server that lets Codex check the Canon
+imageRUNNER 2425i queue and ScanGear scanner, import a finished scan, and prepare and
+submit **one** approved toner-only A4 page with explicit confirmation. See
+[`docs/HARDWARE_MCP.md`](docs/HARDWARE_MCP.md) for setup, Codex registration and the
+safe printing workflow, and [`docs/HARDWARE_AUDIT.md`](docs/HARDWARE_AUDIT.md) for the
+audited hardware facts.
+
 ## Guided notebook
 
 Open [`notebooks/04_physical_alignment.ipynb`](notebooks/04_physical_alignment.ipynb)
