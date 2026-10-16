@@ -56,7 +56,10 @@ class ScanAttachment(_Frozen):
     """One supported attachment of a matching message, before download."""
 
     message_id: str
+    # Gmail issues a new attachmentId on every fetch; use it only to download.
     attachment_id: str
+    # Stable MIME part ID; identifies the attachment across fetches.
+    part_id: str = ""
     filename: str
     mime_type: str
     size_bytes: int
@@ -84,6 +87,7 @@ class ScanSession(_Frozen):
     timeout_s: float
     message_id: str | None = None
     attachment_id: str | None = None
+    part_id: str | None = None
     received_at: datetime | None = None
     subject: str | None = None
     original_filename: str | None = None

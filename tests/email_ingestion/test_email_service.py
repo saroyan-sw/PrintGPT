@@ -32,7 +32,7 @@ def test_newest_scan_is_imported_automatically(tmp_path) -> None:
     assert imported.imported_path.is_relative_to(tmp_path / "artifacts" / "email_scans")
     assert imported.sha256 and imported.run_id == f"email-{imported.sha256[:12]}"
     assert {"email_found", "downloading", "downloaded", "validating", "imported"} <= set(imported.timestamps)
-    assert gmail.attachment_downloads == [("newer", "newer-att0")]
+    assert gmail.attachment_downloads == [("newer", "1")]
 
 
 def test_unrelated_messages_are_ignored(tmp_path) -> None:
@@ -44,7 +44,7 @@ def test_unrelated_messages_are_ignored(tmp_path) -> None:
     session = service.start_scan_session()
     result = service.poll_scan_session(session.session_id)
     assert result.session.message_id == "scan"
-    assert gmail.attachment_downloads == [("scan", "scan-att0")]
+    assert gmail.attachment_downloads == [("scan", "1")]
 
 
 def test_latest_already_processed_waits_for_a_new_scan(tmp_path) -> None:
@@ -70,7 +70,7 @@ def test_same_message_cannot_be_imported_twice(tmp_path) -> None:
     gmail.add_scan("scan")
     service.poll_scan_session(service.start_scan_session().session_id)
     again = service.start_scan_session()
-    result = service.import_selected_scan(again.session_id, "scan", "scan-att0")
+    result = service.import_selected_scan(again.session_id, "scan", "1")
     assert result.outcome is ImportOutcome.ALREADY_PROCESSED
     assert len(gmail.attachment_downloads) == 1
 
@@ -86,7 +86,7 @@ def test_identical_file_in_new_message_is_already_processed(tmp_path) -> None:
     assert "identical file" in result.detail
     # The copy is remembered, so later polls do not download it again.
     service.poll_scan_session(session.session_id)
-    assert gmail.attachment_downloads.count(("forwarded-copy", "forwarded-copy-att0")) == 1
+    assert gmail.attachment_downloads.count(("forwarded-copy", "1")) == 1
 
 
 def test_pdf_is_preferred_over_image_alternative(tmp_path) -> None:
@@ -110,7 +110,7 @@ def test_multiple_candidates_require_selection(tmp_path) -> None:
     assert result.outcome is PollOutcome.NEEDS_SELECTION
     assert [item.filename for item in result.session.selection_candidates] == ["a.pdf", "b.pdf"]
     assert gmail.attachment_downloads == []
-    chosen = service.import_selected_scan(session.session_id, "two-pages", "two-pages-att1")
+    chosen = service.import_selected_scan(session.session_id, "two-pages", "2")
     assert chosen.outcome is ImportOutcome.IMPORTED
     assert chosen.session.original_filename == "b.pdf"
 

@@ -122,6 +122,7 @@ def parse_scan_message(
             ScanAttachment(
                 message_id=message_id,
                 attachment_id=str(attachment_id),
+                part_id=str(part.get("partId") or ""),
                 filename=filename,
                 mime_type=str(part.get("mimeType", "")),
                 size_bytes=int(body.get("size", 0)),

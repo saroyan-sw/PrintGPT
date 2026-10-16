@@ -156,13 +156,13 @@ def _poll_email_session(service: Any, session_id: str) -> None:
         st.caption(result.detail)
     if result.outcome is PollOutcome.NEEDS_SELECTION:
         labels = {
-            f"{item.message_id}/{item.attachment_id}": f"{item.filename} ({item.mime_type}, {item.size_bytes} bytes)"
+            f"{item.message_id}/{item.part_id}": f"{item.filename} ({item.mime_type}, {item.size_bytes} bytes)"
             for item in session.selection_candidates
         }
         choice = st.radio("Several scan attachments arrived — choose one", list(labels), format_func=labels.get)
         if st.button("Import selected attachment"):
-            message_id, attachment_id = choice.split("/", 1)
-            service.import_selected_scan(session_id, message_id, attachment_id)
+            message_id, part_id = choice.split("/", 1)
+            service.import_selected_scan(session_id, message_id, part_id)
             st.rerun()
     elif result.outcome is not PollOutcome.WAITING:
         # Leave the fragment so the whole page renders the final state.
