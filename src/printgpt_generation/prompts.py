@@ -20,12 +20,21 @@ DEFAULT_CONTINUATION_PROMPT: Final[str] = (
 # The guidance image is a separate input; telling the model what its colours mean
 # keeps them from being mistaken for drawing content it should reproduce.
 _GUIDANCE_DESCRIPTION: Final[str] = (
-    "You receive two images. The first is the original page. The second is region "
-    "guidance only: the printable region is tinted green and outlined in magenta; "
-    "forbidden areas are tinted red. Never draw the tints, outline, or any guidance "
-    "mark. Return the complete page at the same size, orientation, and framing as "
-    "the original, with every existing mark in exactly the same place, using black "
-    "lines on the existing white paper."
+    "You receive two images. The first is the page area to work on: the original "
+    "page or a crop of it. The second is region guidance for exactly the same area: "
+    "the printable region is tinted green and outlined in magenta; forbidden areas "
+    "are tinted red. Never draw the tints, outline, or any guidance mark. Return "
+    "the same area as the first image, at the same size, orientation, and framing, "
+    "with every existing mark in exactly the same place, using black lines on the "
+    "existing white paper."
+)
+
+# Two candidates from one prompt differ only by sampling noise; an explicit
+# per-candidate direction gives the user a real choice.
+CANDIDATE_VARIANTS: Final[tuple[str, ...]] = (
+    "Variant A: draw the most natural, direct continuation of what is already there.",
+    "Variant B: draw a clearly different but equally plausible continuation from the "
+    "most obvious one, for example a different composition or detail, in the same style.",
 )
 
 
@@ -47,12 +56,21 @@ def resolve_user_prompt(user_prompt: str | None) -> ResolvedPrompt:
     return ResolvedPrompt(user_prompt, user_prompt.strip(), False)
 
 
-def build_generation_prompt(prompt: ResolvedPrompt) -> str:
-    """Return the full instruction for an initial candidate."""
+def variant_instruction(candidate_index: int) -> str:
+    """Direction for one candidate; indices past the list reuse the last variant."""
+    return CANDIDATE_VARIANTS[min(max(candidate_index, 0), len(CANDIDATE_VARIANTS) - 1)]
+
+
+def build_generation_prompt(prompt: ResolvedPrompt, candidate_index: int | None = None) -> str:
+    """Return the full instruction for an initial candidate.
+
+    ``candidate_index`` adds that candidate's variant direction; ``None`` omits it.
+    """
+    variant = "" if candidate_index is None else f"\n\n{variant_instruction(candidate_index)}"
     if prompt.is_automatic:
-        return f"{prompt.text}\n\n{_GUIDANCE_DESCRIPTION}"
+        return f"{prompt.text}{variant}\n\n{_GUIDANCE_DESCRIPTION}"
     return (
-        f"Drawing request: {prompt.text}\n\n{DEFAULT_CONTINUATION_PROMPT}\n\n"
+        f"Drawing request: {prompt.text}\n\n{DEFAULT_CONTINUATION_PROMPT}{variant}\n\n"
         f"{_GUIDANCE_DESCRIPTION}"
     )
 
@@ -61,9 +79,10 @@ def build_revision_prompt(
     prompt: ResolvedPrompt,
     problems: tuple[str, ...],
     revision_instruction: str,
+    candidate_index: int | None = None,
 ) -> str:
     """Return the instruction for the single permitted revision of a candidate."""
-    lines = [build_generation_prompt(prompt), "", "Revise the previous attempt."]
+    lines = [build_generation_prompt(prompt, candidate_index), "", "Revise the previous attempt."]
     if problems:
         lines.append("Problems found:")
         lines.extend(f"- {problem}" for problem in problems)
@@ -100,7 +119,8 @@ def build_critic_prompt(prompt: ResolvedPrompt, validation_metrics: dict[str, JS
             f"The drawing request was: {prompt.text}",
             "Images: (1) the original page, (2) region guidance where green is printable "
             "and red is forbidden, (3) the preview of the page with ONLY the ink that "
-            "would actually be printed added in black.",
+            "would actually be printed added in black, and, when present, (4) a close-up "
+            "of image (3) around the printable region for judging stroke detail.",
             "Judge the preview, not an idealised version: small gaps where new strokes "
             "stop short of existing ink are required safety clearance and cannot be "
             "removed, but judge whether the continuation still reads naturally.",

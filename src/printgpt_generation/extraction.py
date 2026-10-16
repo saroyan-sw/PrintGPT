@@ -9,6 +9,12 @@ differ, but its aspect ratio must match the canonical raster within
 recorded uniform scale. Anything else is rejected as unsupported geometry;
 stretching a cropped or padded image would silently misregister new ink.
 
+Crop framing is the one declared exception: when the provider output carries a
+``canvas_box``, it depicts exactly that window of the page. It must match the
+window's aspect ratio, is scaled into the window, and is pasted over the source
+page. Registration is measured inside the window only, because the untouched
+rest of the page would otherwise always look perfectly registered.
+
 New-ink extraction (registered-image comparison)
 ------------------------------------------------
 Raw pixel subtraction is not evidence of new art: models redraw existing
@@ -34,6 +40,7 @@ import numpy as np
 
 from printgpt_alignment.geometry import A4CalibrationLayout, mm_to_px, px_to_mm
 
+from .framing import PixelBox, full_box
 from .models import (
     BinaryMask,
     ExtractionReport,
@@ -104,6 +111,7 @@ def _rejection(
     transform: tuple[tuple[float, float, float], ...] | None = None,
     aspect_error: float = 0.0,
     registration: RegistrationReport | None = None,
+    canvas_box: PixelBox | None = None,
 ) -> NormalizationOutcome:
     record = NormalizationRecord(
         input_shape=input_shape,
@@ -112,6 +120,7 @@ def _rejection(
         registration=registration,
         extraction=None,
         failure_reasons=tuple(reasons),
+        canvas_box=None if canvas_box is None else canvas_box.as_tuple(),
     )
     return NormalizationOutcome(record, None)
 
@@ -134,8 +143,10 @@ def to_rgb_uint8(image: np.ndarray) -> RGBImage | None:
     return None
 
 
-def _scale_transform(scale_x: float, scale_y: float) -> tuple[tuple[float, float, float], ...]:
-    return ((scale_x, 0.0, 0.0), (0.0, scale_y, 0.0), (0.0, 0.0, 1.0))
+def _scale_transform(
+    scale_x: float, scale_y: float, offset_x: float = 0.0, offset_y: float = 0.0
+) -> tuple[tuple[float, float, float], ...]:
+    return ((scale_x, 0.0, offset_x), (0.0, scale_y, offset_y), (0.0, 0.0, 1.0))
 
 
 def dark_neutral_ink(image: RGBImage, config: ExtractionConfig) -> tuple[np.ndarray, np.ndarray]:
@@ -273,6 +284,7 @@ def normalize_and_extract(
     config: ExtractionConfig,
     additions_mask: np.ndarray | None = None,
     source_page: RGBImage | None = None,
+    canvas_box: tuple[int, int, int, int] | None = None,
 ) -> NormalizationOutcome:
     """Map provider output to canonical pixels and extract proposed new ink.
 
@@ -283,6 +295,9 @@ def normalize_and_extract(
     Registration therefore compares the same dark-neutral class on both source
     and candidate, while extraction and protection continue to use Track A's
     complete existing-ink mask.
+
+    ``canvas_box`` declares crop framing (see the module docstring). It requires
+    ``source_page``, which fills the page outside the window.
     """
     input_shape = tuple(int(value) for value in raw_image.shape)
     rgb = to_rgb_uint8(raw_image)
@@ -292,38 +307,71 @@ def normalize_and_extract(
     if min(height, width) < config.min_output_side_px:
         return _rejection(input_shape, [f"output {width}x{height} is smaller than {config.min_output_side_px} px"])
 
-    target_height, target_width = layout.image_shape
+    page_box = full_box(layout.image_shape)
+    window = page_box
+    if canvas_box is not None:
+        if source_page is None:
+            raise ValueError("crop-framed output requires source_page")
+        window = PixelBox(*canvas_box)
+        if not window.fits(layout.image_shape):
+            return _rejection(
+                input_shape, [f"canvas box {window.as_tuple()} lies outside the canonical page"], canvas_box=window
+            )
+    cropped = window != page_box
+    target_height, target_width = window.height, window.width
     expected_aspect = target_width / target_height
     aspect_error = abs((width / height) / expected_aspect - 1.0)
     if aspect_error > config.aspect_ratio_tolerance:
+        expected = f"the declared {target_width}x{target_height} window" if cropped else "A4"
+        unsupported = "" if cropped else "; cropped, padded, or rotated output is unsupported"
         return _rejection(
             input_shape,
             [
-                f"aspect ratio {width / height:.4f} differs from A4 {expected_aspect:.4f} by "
-                f"{aspect_error:.2%}; cropped, padded, or rotated output is unsupported"
+                f"aspect ratio {width / height:.4f} differs from {expected} {expected_aspect:.4f} by "
+                f"{aspect_error:.2%}{unsupported}"
             ],
             aspect_error=aspect_error,
+            canvas_box=window if cropped else None,
         )
 
-    transform = _scale_transform(target_width / width, target_height / height)
+    transform = _scale_transform(target_width / width, target_height / height, float(window.x), float(window.y))
     if (height, width) == (target_height, target_width):
-        canonical = rgb
+        window_rgb = rgb
     else:
-        canonical = cv2.resize(rgb, (target_width, target_height), interpolation=cv2.INTER_AREA)
+        window_rgb = cv2.resize(rgb, (target_width, target_height), interpolation=cv2.INTER_AREA)
+    if cropped:
+        assert source_page is not None
+        require_rgb_image(source_page, layout.image_shape, "source_page")
+        canonical = source_page.copy()
+        canonical[window.slices()] = window_rgb
+    else:
+        canonical = window_rgb
 
     existing = existing_ink_mask > 0
-    ink_classes = dark_neutral_ink(canonical, config)
+    window_neutral, window_coloured = dark_neutral_ink(window_rgb, config)
     registration_source = existing
     if source_page is not None:
         require_rgb_image(source_page, layout.image_shape, "source_page")
         registration_source = existing & dark_neutral_ink(source_page, config)[0]
-    registration = check_registration(registration_source, ink_classes[0], layout, config)
+    registration = check_registration(window.crop(registration_source), window_neutral, layout, config)
     failures = _registration_failures(registration, config)
+    record_box = window.as_tuple() if cropped else None
     if failures:
         return _rejection(
-            input_shape, failures, transform=transform, aspect_error=aspect_error, registration=registration
+            input_shape,
+            failures,
+            transform=transform,
+            aspect_error=aspect_error,
+            registration=registration,
+            canvas_box=window if cropped else None,
         )
 
+    # Extraction runs on the full page so the redraw band also covers original
+    # ink just outside the window; proposals can only come from the window.
+    neutral_ink = np.zeros(layout.image_shape, dtype=bool)
+    coloured = np.zeros(layout.image_shape, dtype=bool)
+    neutral_ink[window.slices()] = window_neutral
+    coloured[window.slices()] = window_coloured
     additions_layer = None
     if additions_mask is not None:
         resized = cv2.resize(
@@ -331,9 +379,10 @@ def normalize_and_extract(
             (target_width, target_height),
             interpolation=cv2.INTER_NEAREST,
         )
-        additions_layer = resized > 0
+        additions_layer = np.zeros(layout.image_shape, dtype=bool)
+        additions_layer[window.slices()] = resized > 0
     new_ink, extraction = extract_new_ink(
-        canonical, existing_ink_mask, layout, config, additions_layer, ink_classes
+        canonical, existing_ink_mask, layout, config, additions_layer, (neutral_ink, coloured)
     )
     record = NormalizationRecord(
         input_shape=input_shape,
@@ -341,5 +390,6 @@ def normalize_and_extract(
         aspect_ratio_error=aspect_error,
         registration=registration,
         extraction=extraction,
+        canvas_box=record_box,
     )
     return NormalizationOutcome(record, NormalizedCandidate(readonly_copy(canonical), readonly_copy(new_ink)))

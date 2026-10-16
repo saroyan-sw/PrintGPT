@@ -180,24 +180,65 @@ helpers only.
 
 `printgpt_generation.gemini` provides `GeminiImageGenerator` and
 `GeminiVisualCritic`. They use `google-genai` 2.31 and its Interactions API
-(`client.interactions.create`), checked against the official docs and the
-installed SDK in October 2026.
+(`client.interactions.create`). Both default model IDs, `gemini-nano-banana-2.1`
+(image) and `gemini-3.8-flash` (critic), are in that SDK's model list; they are
+configurable through `GeminiSettings`.
 
-- Default model IDs are `gemini-nano-banana-2.1` (image) and `gemini-3.8-flash`
-  (critic). Both are configurable through `GeminiSettings`.
-- `create_gemini_client()` reads `GEMINI_API_KEY` only when called. It disables
-  the SDK's internal retries, which otherwise made 4 requests per call, so
+- `create_gemini_client()` disables the SDK's internal retries, so
   `RetryPolicy` remains the only retry bound.
-- Gemini cannot output A4 aspect. The adapter pads inputs on the right to 3:4
-  (padding tinted as forbidden in the guidance), requests 3:4, rescales, and
-  crops. Registration checks still validate the result.
-- The critic requests JSON constrained to `CriticReport`'s schema. The response
-  is still parsed as untrusted text.
+- Output is requested as JPEG: `ImageResponseFormat.mime_type` in 2.31 accepts
+  only `image/jpeg`. Each candidate's `seed` is sent as `generation_config.seed`.
+- The critic requests JSON constrained to `CriticReport`'s schema; the response
+  is still parsed as untrusted text. It receives the original page, the region
+  guidance, the sanitized preview, and a close-up of the sanitized preview
+  around the printable region (`CritiqueCall.region_preview`, 15 mm margin).
 
-**Live status: implemented and tested only against a mock transport.** No
-Gemini credentials were available, so no live request has been made. Run the
-live smoke test with `PRINTGPT_LIVE_GEMINI=1` and `GEMINI_API_KEY` set. It
-makes paid requests.
+### Framing
+
+Gemini cannot output A4 aspect. `GeminiSettings.framing` chooses how the page is
+framed:
+
+- `crop` (default): the window around the printable region is grown by
+  `context_margin_mm` (25 mm), then further until it holds at least
+  `min_context_ink_mm2` of existing ink, then to the supported aspect ratio
+  that needs the smallest canvas, using real page around it. Only what the page
+  cannot supply is padded (white; forbidden tint in the guidance). A reduced
+  thumbnail of the whole page with the window outlined in blue is sent as
+  context only. The output is cropped back to the window and returned with
+  `GeneratedImage.canvas_box`.
+- `full_page`: the whole page is padded on the right to 3:4, as before.
+
+For crop-framed output, extraction pastes the window over the source page and
+measures registration **inside the window only**; the untouched rest of the
+page would otherwise always look registered. New ink can only come from the
+window, while the redraw band still covers original ink just outside it.
+`NormalizationRecord.canvas_box` and the translation in `raw_to_canonical`
+record the mapping.
+
+### Candidate variants
+
+Each initial candidate gets its own direction (`prompts.CANDIDATE_VARIANTS`):
+A is the most direct continuation, B a clearly different but plausible one.
+Revisions keep their candidate's direction.
+
+### Running live
+
+- MVP pipeline: `run_offline_document(..., backend="gemini")` swaps only the
+  generator and critic (`printgpt_mvp.pipeline.gemini_dependencies`); the
+  `TrackAValidator`, bounded graph, approval gate and export are unchanged. The
+  key is read from `GEMINI_API_KEY` or the local `.env`. Without it,
+  `LiveGenerationUnavailable` is raised before anything is written or requested.
+- Streamlit: the **Live Gemini** toggle (default off). Without a key the app
+  shows a warning and keeps generation disabled.
+- Verification script: `scripts/live_gemini_run.py` runs one scan, writes
+  `live_report.json` (model IDs, SDK version, registration and extraction
+  metrics, critic schema compliance, retries) and `contact_sheet.png`. It
+  defaults to the offline backend; `--backend gemini --confirm-paid` makes
+  paid requests.
+
+**Live status: tested only against a mock transport.** No live request has been
+made yet. The pytest smoke test runs with `PRINTGPT_LIVE_GEMINI=1` and
+`GEMINI_API_KEY` set; it makes paid requests.
 
 ## Integration steps with Track A
 
@@ -237,5 +278,5 @@ makes paid requests.
 - Synchronous provider timeouts are enforced by adapters (the Gemini HTTP
   timeout), not pre-emptively by the graph.
 - Critic scores are uncalibrated. Thresholds need tuning with real outputs.
-- Gemini behaviour (framing fidelity at 3:4, schema compliance) is unverified
-  live.
+- Gemini behaviour (crop and 3:4 framing fidelity, JPEG artefacts, seed
+  support, schema compliance) is unverified live.

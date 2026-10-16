@@ -103,6 +103,7 @@ def _attempt_metadata(attempt: AttemptRecord, artifacts: Mapping[str, str]) -> A
         "failure": _dataclass_dict(generation.failure),
         "raw_shape": list(output.image.shape) if output is not None else None,
         "has_additions_layer": output is not None and output.additions_mask is not None,
+        "canvas_box": list(output.canvas_box) if output is not None and output.canvas_box else None,
         "usage": _dataclass_dict(output.usage) if output is not None else None,
     }
     critic = _dataclass_dict(attempt.critic)

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import StrEnum
 import json
 from math import ceil, floor, isclose
+import os
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +34,7 @@ from printgpt_generation.doubles import (
 )
 from printgpt_generation.graph import GraphDependencies
 from printgpt_generation.models import AttemptRecord, RunStatus, require_binary_mask
-from printgpt_generation.providers import FixedStepClock, SequentialIdProvider
+from printgpt_generation.providers import FixedStepClock, SequentialIdProvider, SystemClock, UuidIdProvider
 from printgpt_generation.requests import GenerationRunResult
 from printgpt_generation.track_a import TrackAValidator
 from printgpt_masking import build_masks
@@ -186,6 +188,72 @@ def rectangular_allowed_region(
     return mask
 
 
+class GenerationBackend(StrEnum):
+    """Which generator and critic run inside the unchanged LangGraph workflow."""
+
+    OFFLINE = "offline"
+    GEMINI = "gemini"
+
+
+class LiveGenerationUnavailable(RuntimeError):
+    """Live Gemini cannot start (no key or SDK); nothing has been written or requested."""
+
+
+GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
+
+
+def gemini_api_key(dotenv_path: Path | None = Path(".env")) -> str | None:
+    """Return ``GEMINI_API_KEY`` from the environment, else from the local ``.env``."""
+    key = os.environ.get(GEMINI_API_KEY_ENV, "").strip()
+    if not key and dotenv_path is not None:
+        from printgpt_mvp.email_ingestion.settings import read_dotenv
+
+        key = read_dotenv(dotenv_path).get(GEMINI_API_KEY_ENV, "").strip()
+    return key or None
+
+
+def gemini_dependencies(
+    config: GenerationConfig,
+    validation: ValidationConfig,
+    *,
+    settings: Any | None = None,
+    client: Any | None = None,
+) -> GraphDependencies:
+    """Live dependencies: only the generator and critic change.
+
+    ``TrackAValidator`` and the bounded graph stay exactly as offline. ``client``
+    lets tests inject a mock-transport client; otherwise the key is required.
+    """
+    try:
+        from printgpt_generation.gemini import (
+            GeminiImageGenerator,
+            GeminiSettings,
+            GeminiVisualCritic,
+            create_gemini_client,
+        )
+    except ImportError as error:
+        raise LiveGenerationUnavailable(
+            "Live Gemini needs the google-genai SDK: pip install -e \".[gemini]\""
+        ) from error
+    if client is None:
+        key = gemini_api_key()
+        if key is None:
+            raise LiveGenerationUnavailable(
+                f"Live Gemini needs an API key. Set {GEMINI_API_KEY_ENV} in the environment or in the "
+                "local .env file (see .env.example). No request was made."
+            )
+        client = create_gemini_client(key)
+    settings = settings or GeminiSettings()
+    return GraphDependencies(
+        generator=GeminiImageGenerator(client, settings),
+        validator=TrackAValidator(validation),
+        critic=GeminiVisualCritic(client, settings),
+        clock=SystemClock(),
+        ids=UuidIdProvider(),
+        config=config,
+    )
+
+
 def _offline_dependencies(config: GenerationConfig, validation: ValidationConfig) -> GraphDependencies:
     return GraphDependencies(
         generator=DeterministicGenerator({(1, 0): GeneratorBehavior.OUTSIDE_REGION}),
@@ -260,8 +328,24 @@ def run_offline_document(
     normalization_confirmed: bool | None = None,
     input_kind: InputKind = "auto",
     registration: RegistrationOptions | None = None,
+    backend: GenerationBackend | str = GenerationBackend.OFFLINE,
+    gemini_settings: Any | None = None,
+    gemini_client: Any | None = None,
 ) -> MvpRun:
-    """Run alignment, masking, generation, validation, criticism, and selection offline."""
+    """Run alignment, masking, generation, validation, criticism, and selection.
+
+    ``backend`` selects the deterministic offline doubles (default) or live
+    Gemini. Live prerequisites are checked before anything is written, and no
+    backend ever creates printable output: only ``approve_and_export`` does.
+    """
+    backend = GenerationBackend(backend)
+    config = GenerationConfig(layout=layout)
+    if backend is GenerationBackend.GEMINI:
+        dependencies = gemini_dependencies(
+            config, validation_config, settings=gemini_settings, client=gemini_client
+        )
+    else:
+        dependencies = _offline_dependencies(config, validation_config)
     normalization_requested = normalization_result is not None or input_mode is not None
     if normalization_requested and normalization_confirmed is not True:
         raise PermissionError("normalized page preview confirmation is required before generation")
@@ -377,9 +461,8 @@ def run_offline_document(
         layout=layout,
         config=effective_masking_config,
     )
-    config = GenerationConfig(layout=layout)
     request = create_generation_request(canonical, masks, user_prompt, config=config, seed=seed)
-    generation = run_generation(request, _offline_dependencies(config, validation_config))
+    generation = run_generation(request, dependencies)
     generation_record = write_run_record(generation, root / "generation")
     run = MvpRun(
         input_path=Path(input_path),

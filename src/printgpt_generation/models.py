@@ -119,17 +119,25 @@ class GeneratedImage:
 
     ``image`` may have any size or channel layout; normalization decides whether
     it is supported. ``additions_mask`` is an optional explicit additions layer
-    in the same pixel grid as ``image``.
+    in the same pixel grid as ``image``. ``canvas_box`` is ``(x, y, width,
+    height)`` in canonical pixels when ``image`` depicts only that window of the
+    page (crop framing); ``None`` means the complete page.
     """
 
     image: np.ndarray
     model_id: str
     additions_mask: np.ndarray | None = None
     usage: UsageRecord = field(default_factory=UsageRecord)
+    canvas_box: tuple[int, int, int, int] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.image, np.ndarray) or self.image.size == 0:
             raise ValueError("generated image must be a non-empty NumPy array")
+        if self.canvas_box is not None:
+            box = tuple(int(value) for value in self.canvas_box)
+            if len(box) != 4 or box[0] < 0 or box[1] < 0 or box[2] < 1 or box[3] < 1:
+                raise ValueError(f"canvas_box must be (x, y, width, height) with a positive size, got {self.canvas_box}")
+            object.__setattr__(self, "canvas_box", box)
         object.__setattr__(self, "image", readonly_copy(self.image))
         if self.additions_mask is not None:
             if self.additions_mask.shape[:2] != self.image.shape[:2]:
@@ -177,6 +185,8 @@ class NormalizationRecord:
     registration: RegistrationReport | None
     extraction: ExtractionReport | None
     failure_reasons: tuple[str, ...] = ()
+    # Window of the page the raw output depicts; registration was measured inside it.
+    canvas_box: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True, slots=True, eq=False)
