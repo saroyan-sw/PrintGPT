@@ -1,5 +1,20 @@
 # PrintGPT integrated MVP
 
+## Physical registration update
+
+Preview acceptance no longer authorizes export onto the original sheet. The app
+and CLI now retain PDF page boxes/rotation/UserUnit and raster scanner DPI, and
+support confirmed whole-sheet, paper-corner, metadata and measured-crop geometry.
+An arbitrary fitted scan remains usable for previews but cannot be exported until
+its physical size and origin are established. PDF CropBox offsets and missing
+coverage are preserved; unknown regions are excluded from generation.
+
+See [physical alignment and Canon 2425i procedure](PHYSICAL_ALIGNMENT.md) for the
+coordinate contract, assumptions, new notebook, 30-case marker-free software
+benchmark, calibration target and independent repeated physical measurements.
+Successful software tests are not measured printer accuracy. The optional printer
+affine correction is separate from source registration and applies only at export.
+
 ## Dependable path
 
 The MVP supports black line drawings on light A4 paper through two explicit
@@ -84,6 +99,9 @@ Before approval, no `print/` output is created. Approval accepts only an
 attempt present in the graph's ranked eligible results. The exporter checks
 again that validation is real and accepted and that the sanitized mask is a
 0/255 `uint8` array with exactly the canonical dimensions.
+It also rejects unregistered preview-only source geometry. Export without a
+measured printer profile is explicitly unmeasured and intended for sacrificial
+verification first, not a guarantee of accurate overlay on a valuable original.
 
 The PNG and PDF are built from `sanitized_new_ink_mask` only:
 

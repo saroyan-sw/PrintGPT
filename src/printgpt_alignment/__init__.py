@@ -7,10 +7,16 @@ from .detection import (
     detect_and_rectify,
     detect_and_rectify_document,
 )
-from .document import LoadedDocumentPage, load_document_page, load_document_page_info
+from .document import DocumentPage, load_document, load_document_page
+from .registration import RegistrationOptions, register_document, evaluate_control_points
 from .geometry import A4CalibrationLayout, DEFAULT_LAYOUT, mm_to_px, px_to_mm
 
 __all__ = [
+    "DocumentPage",
+    "RegistrationOptions",
+    "load_document",
+    "register_document",
+    "evaluate_control_points",
     "A4CalibrationLayout",
     "BoundaryThresholds",
     "DEFAULT_LAYOUT",
