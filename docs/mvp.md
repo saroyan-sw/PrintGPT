@@ -2,9 +2,17 @@
 
 ## Dependable path
 
-The MVP intentionally supports one narrow workflow: black line drawings on
-light, marked A4 paper. A supported raster image or PDF page is loaded and
-rectified by the alignment component. The OpenCV result is converted from BGR
+The MVP supports black line drawings on light A4 paper, with or without
+calibration markers. A supported raster image or PDF page is loaded and
+rectified by the alignment component. It prefers marker alignment, then uses
+the image bounds for scanner exports or detects the outer paper boundary for
+photographs. Scanner exports do not need A4 proportions or visible background.
+Non-A4 scans are fitted uniformly to the A4 canvas, with a warning about unknown
+physical size; added padding is excluded from the allowed completion region.
+The input-type control can explicitly select scan or photo handling. Low-contrast,
+low-resolution, or blurry scans request a rescan. Photographs with unclear or
+clipped page boundaries do too. A cropped scanner export cannot reveal what
+content is missing, so users must check completeness. The OpenCV result is converted from BGR
 to RGB exactly once. The user must define a rectangular allowed completion
 region; the rest of the page is never implicitly allowed.
 
@@ -21,7 +29,14 @@ The integrated implementation is in `printgpt_mvp.pipeline`. It always uses
 `TrackAValidator`; simulated validation is rejected at export. Generation
 records and diagnostic images are saved under the run directory. A small
 `mvp_manifest.json` records the selected attempt, validation result, approval
-state, and export paths.
+state, and export paths. `alignment.json` records the input mode, chosen method,
+transform, quality measurements, and physical-size warnings.
+
+The alignment notebook's synthetic and SmartDoc benchmarks intentionally use
+`detect_and_rectify`, the strict marker detector. Their setup overlays a
+calibration layout onto the source documents; they do not measure raw unmarked
+scan acceptance. App uploads and the CLI use `detect_and_rectify_document`,
+which retains the same marker implementation and adds the two unmarked paths.
 
 ## Integration failures found and fixed
 

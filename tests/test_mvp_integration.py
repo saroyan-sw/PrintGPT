@@ -9,7 +9,12 @@ import pytest
 from printgpt_alignment.calibration_page import render_calibration_image
 from printgpt_alignment.geometry import A4CalibrationLayout, mm_to_px
 from printgpt_generation.models import AttemptStatus, RunStatus
-from printgpt_mvp import approve_and_export, rectangular_allowed_region, run_offline_document
+from printgpt_mvp import (
+    approve_and_export,
+    canonicalize_document,
+    rectangular_allowed_region,
+    run_offline_document,
+)
 
 
 LAYOUT = A4CalibrationLayout(dpi=75.0)
@@ -122,3 +127,52 @@ def test_pdf_is_exact_a4_and_incorrect_mask_dimensions_are_rejected(offline_run)
     bad_run = replace(offline_run, generation=bad_generation)
     with pytest.raises(ValueError, match="shape"):
         approve_and_export(bad_run, selected.attempt_id, approved=True)
+
+
+def test_mvp_canonicalizes_unmarked_full_frame_scan(tmp_path) -> None:
+    page = np.full((*LAYOUT.image_shape, 3), 255, dtype=np.uint8)
+    cv2.putText(
+        page,
+        "unfinished sketch",
+        (60, 120),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        (0, 0, 0),
+        2,
+    )
+    cv2.circle(page, (_px(105), _px(150)), _px(25), (0, 0, 0), 3)
+    input_path = tmp_path / "ordinary_scan.png"
+    assert cv2.imwrite(str(input_path), page)
+
+    canonical, report = canonicalize_document(input_path, layout=LAYOUT)
+
+    assert canonical.shape == (*LAYOUT.image_shape, 3)
+    assert report["accepted"] is True
+    assert report["alignment_method"] == "scan_frame"
+
+
+def test_mvp_bad_scan_error_tells_user_to_scan_again(tmp_path) -> None:
+    input_path = tmp_path / "bad_scan.png"
+    assert cv2.imwrite(str(input_path), np.full((*LAYOUT.image_shape, 3), 245, dtype=np.uint8))
+    with pytest.raises(ValueError, match="scan again"):
+        canonicalize_document(input_path, layout=LAYOUT)
+
+
+def test_non_a4_scan_runs_through_generation_and_excludes_padding(tmp_path):
+    page = np.full((1000, 802, 3), 255, dtype=np.uint8)
+    cv2.putText(page, "Scanner export", (100, 180), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 3)
+    cv2.rectangle(page, (70, 260), (700, 800), (0, 0, 0), 3)
+    path = tmp_path / "scan.png"
+    assert cv2.imwrite(str(path), page)
+    allowed = np.full(LAYOUT.image_shape, 255, dtype=np.uint8)
+    run = run_offline_document(path, allowed, tmp_path / "run", layout=LAYOUT)
+    assert run.alignment["alignment_method"] == "scan_frame"
+    assert run.alignment["warnings"]
+    assert len(run.candidates) == 2
+    assert not np.any(run.masks.layout_exclusion_mask)
+    assert not np.any(run.masks.allowed_region_mask[:40])
+    assert np.all(allowed == 255)  # Caller-owned region was not mutated.
+    assert (run.output_dir / "alignment.json").is_file()
+    assert not (run.output_dir / "print").exists()
+    for candidate in run.candidates:
+        assert not np.any(candidate.attempt.sanitized_new_ink_mask[:40])

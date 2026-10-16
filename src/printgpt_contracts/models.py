@@ -28,6 +28,7 @@ class MaskingConfig:
     printer_margin_mm: float = 10.0
     layout_guide_clearance_mm: float = 0.5
     exclude_calibration_labels: bool = True
+    exclude_calibration_markers: bool = True
 
     def __post_init__(self) -> None:
         if not 0 <= self.absolute_ink_threshold <= 255:

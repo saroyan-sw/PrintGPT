@@ -136,17 +136,18 @@ def _fill_rect_mm(
 
 def _layout_exclusions(layout: A4CalibrationLayout, config: MaskingConfig) -> BinaryMask:
     result = np.zeros(layout.image_shape, dtype=np.uint8)
-    quiet = layout.marker_quiet_zone_mm
-    for marker in layout.markers:
-        bounds = marker.bounds_mm
-        _fill_rect_mm(
-            result,
-            layout,
-            bounds.x - quiet,
-            bounds.y - quiet,
-            bounds.width + 2.0 * quiet,
-            bounds.height + 2.0 * quiet,
-        )
+    if config.exclude_calibration_markers:
+        quiet = layout.marker_quiet_zone_mm
+        for marker in layout.markers:
+            bounds = marker.bounds_mm
+            _fill_rect_mm(
+                result,
+                layout,
+                bounds.x - quiet,
+                bounds.y - quiet,
+                bounds.width + 2.0 * quiet,
+                bounds.height + 2.0 * quiet,
+            )
 
     guide = config.layout_guide_clearance_mm
     if guide > 0:

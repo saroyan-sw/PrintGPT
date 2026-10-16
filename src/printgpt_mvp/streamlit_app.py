@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from hashlib import sha256
 from uuid import uuid4
 
 from printgpt_alignment import DEFAULT_LAYOUT
@@ -21,19 +22,34 @@ def _candidate_label(run: MvpRun, attempt_id: str) -> str:
     return f"Candidate {candidate.candidate_id} — score {candidate.score:.1f}"
 
 
+def _clear_results() -> None:
+    import streamlit as st
+
+    for key in ("mvp_run", "approved_export", "approve_preview"):
+        st.session_state.pop(key, None)
+
+
 def main() -> None:
     import streamlit as st
 
     st.set_page_config(page_title="PrintGPT MVP", layout="wide")
     st.title("PrintGPT — safe A4 completion preview")
     st.caption(
-        "Offline deterministic demonstration. Nothing is exported until you explicitly "
-        "approve a validated preview."
+        "Upload a scanned document or a photo of a page. Markers are optional. Output uses A4. "
+        "This is the offline demonstration with two generated sample additions. "
+        "Nothing is exported until you explicitly approve a validated preview."
     )
 
     upload = st.file_uploader(
-        "Upload a marked A4 scan or supported PDF",
+        "Upload a scan or PDF (markers optional)",
         type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"],
+    )
+    kind_labels = {"auto": "Automatic", "scan": "Scanned page", "photo": "Photo of a page"}
+    input_kind = st.selectbox(
+        "Input type",
+        list(kind_labels),
+        format_func=kind_labels.get,
+        help="Scanned page uses the entire image, including scanner borders. Photo finds the paper edges.",
     )
     prompt = st.text_input("Optional continuation prompt", placeholder="Leave blank for automatic continuation")
     st.subheader("Allowed completion rectangle (millimetres from the top-left)")
@@ -43,7 +59,16 @@ def main() -> None:
     width_mm = columns[2].number_input("Width", min_value=1.0, max_value=210.0, value=130.0, step=1.0)
     height_mm = columns[3].number_input("Height", min_value=1.0, max_value=297.0, value=180.0, step=1.0)
 
+    request_key = (
+        sha256(upload.getvalue()).hexdigest() if upload is not None else None,
+        input_kind, prompt, x_mm, y_mm, width_mm, height_mm,
+    )
+    if st.session_state.get("request_key") != request_key:
+        _clear_results()
+        st.session_state["request_key"] = request_key
+
     if st.button("Generate two candidates", type="primary", disabled=upload is None):
+        _clear_results()
         try:
             allowed = rectangular_allowed_region(
                 x_mm=x_mm,
@@ -63,14 +88,28 @@ def main() -> None:
                     run_root / "run",
                     user_prompt=prompt,
                     layout=DEFAULT_LAYOUT,
+                    input_kind=input_kind,
                 )
                 st.session_state.pop("approved_export", None)
         except Exception as error:
-            st.error(str(error))
+            message = str(error)
+            if "scan again" in message.lower():
+                st.error(f"Scan again required — {message}")
+            else:
+                st.error(message)
 
     run = st.session_state.get("mvp_run")
     if not isinstance(run, MvpRun):
         return
+    if run.alignment.get("alignment_method") == "scan_frame":
+        st.info("The full scanned image was used as the page. No markers or surrounding background are needed.")
+    if run.alignment.get("alignment_method") == "page_boundary":
+        st.info(
+            "No usable calibration markers were found, so the page was aligned from its "
+            "outer boundary. Check the preview carefully before approval."
+        )
+    for warning in run.alignment.get("warnings", ()):
+        st.warning(warning)
     if not run.candidates:
         st.error("No candidate passed deterministic validation and criticism. Review the failures below and try again.")
     else:
@@ -100,7 +139,7 @@ def main() -> None:
             attempt_ids,
             format_func=lambda value: _candidate_label(run, value),
         )
-        confirmed = st.checkbox("I approve this sanitized new-ink preview for A4 export.")
+        confirmed = st.checkbox("I approve this sanitized new-ink preview for A4 export.", key="approve_preview")
         if st.button("Approve and create toner-only files", disabled=not confirmed):
             try:
                 st.session_state["approved_export"] = approve_and_export(run, choice, approved=True)

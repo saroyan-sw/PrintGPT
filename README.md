@@ -1,6 +1,6 @@
 # PrintGPT
 
-PrintGPT aligns a marked A4 scan, protects the page's existing ink, generates
+PrintGPT aligns an A4 scan, protects the page's existing ink, generates
 two continuation candidates, validates and criticizes sanitized previews, and
 exports only the explicitly approved new ink. The dependable MVP path is
 offline and deterministic; the optional Gemini adapter remains separately
@@ -26,13 +26,26 @@ Run the approval interface:
 python -m streamlit run src/printgpt_mvp/streamlit_app.py
 ```
 
-The interface accepts a supported image or PDF, requires an explicit allowed
-completion rectangle, displays both model candidates and the actual sanitized
+The interface accepts a supported image or PDF with or without calibration
+markers, requires an explicit allowed completion rectangle, displays both model candidates and the actual sanitized
 print previews, and creates no printable output until the user approves an
 eligible candidate. The export is a toner-only PNG and a 210 × 297 mm PDF.
+Markers are used when available. Otherwise, Automatic mode recognizes scanner
+exports where light paper reaches the image borders, including ordinary scan
+proportions and narrow scanner bars. These scans need no external page outline.
+Photographs use a visible paper boundary. Choose **Scanned page** to explicitly
+use the full image, or **Photo of a page** to require boundary detection.
+Blurry, too faint, or undersized scans still request a rescan. An image whose
+proportions differ from A4 is fitted without stretching; the app explains that
+its physical size is unknown and alignment on the original sheet is not assured.
+Missing content cannot be recovered or reliably identified from an already
+cropped scanner export. Verify that the full original page is present.
 Print the PDF at **100% / Actual Size** with Fit, Shrink, borderless expansion,
 and automatic rotation disabled. See [`docs/mvp.md`](docs/mvp.md) for the
 end-to-end contract and physical-printer limitations.
+
+The next physical-registration task is specified in
+[`docs/PHYSICAL_ALIGNMENT_HANDOFF.md`](docs/PHYSICAL_ALIGNMENT_HANDOFF.md).
 
 ## Guided notebook
 
@@ -67,12 +80,16 @@ notebook dependencies in a fresh environment:
 .\.venv\Scripts\python.exe -m printgpt_alignment smartdoc C:\path\to\sampleDataset.tar.gz
 ```
 
-PDF input is rendered to pixels at the requested DPI before ArUco detection.
+PDF input is rendered to pixels at the requested DPI before alignment. ArUco
+markers are preferred, followed by scan-frame or photograph-boundary alignment.
+The CLI has the same `--input-kind auto|scan|photo` options as the interface.
 The default is 300 DPI, matching the canonical 2480 × 3508 A4 coordinate
 system. `--page` is 1-based and defaults to the first page. Rectified output is
 a raster image because OpenCV's alignment calculations operate on pixels.
 
 When running without installing the package, set `PYTHONPATH=src` first.
+Run from this repository root. After changing imported pipeline modules, restart
+the Streamlit server; a screen rerun can retain old imported functions.
 Print the calibration PDF at actual size (100%) with all fit-to-page options disabled.
 
 Component details: [masking](docs/masking.md),

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from math import ceil, floor, isclose
 from pathlib import Path
@@ -18,11 +18,12 @@ from reportlab.pdfgen import canvas
 from printgpt_alignment import (
     A4CalibrationLayout,
     DEFAULT_LAYOUT,
-    detect_and_rectify,
+    detect_and_rectify_document,
     load_document_page,
     mm_to_px,
 )
 from printgpt_contracts import MaskBundle, MaskingConfig, ValidationConfig
+from printgpt_alignment.detection import InputKind
 from printgpt_generation import GenerationConfig, create_generation_request, run_generation, write_run_record
 from printgpt_generation.doubles import (
     CriticScript,
@@ -120,11 +121,12 @@ def canonicalize_document(
     *,
     page_index: int = 0,
     layout: A4CalibrationLayout = DEFAULT_LAYOUT,
+    input_kind: InputKind = "auto",
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Load one supported image/PDF page, rectify it, and convert BGR to RGB once."""
     path = Path(input_path)
     source = load_document_page(path, page_index=page_index, dpi=layout.dpi)
-    detection = detect_and_rectify(source, layout)
+    detection = detect_and_rectify_document(source, layout, input_kind=input_kind)
     if not detection.accepted or detection.warped is None:
         raise ValueError(f"page alignment rejected: {detection.reason}")
     canonical = _rgb_from_alignment(detection.warped)
@@ -135,6 +137,7 @@ def canonicalize_document(
     report["input_path"] = str(path)
     report["page_index"] = page_index
     report["canonical_colour_space"] = "RGB"
+    report["input_kind"] = input_kind
     return canonical, report
 
 
@@ -224,12 +227,41 @@ def run_offline_document(
     layout: A4CalibrationLayout = DEFAULT_LAYOUT,
     masking_config: MaskingConfig = MaskingConfig(),
     validation_config: ValidationConfig = ValidationConfig(),
+    input_kind: InputKind = "auto",
 ) -> MvpRun:
     """Run alignment, masking, generation, validation, criticism, and selection offline."""
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
-    canonical, alignment = canonicalize_document(input_path, page_index=page_index, layout=layout)
-    masks = build_masks(canonical, allowed_region_mask, layout=layout, config=masking_config)
+    canonical, alignment = canonicalize_document(
+        input_path, page_index=page_index, layout=layout, input_kind=input_kind
+    )
+    _write_json(root / "alignment.json", alignment)
+    effective_masking_config = masking_config
+    if alignment.get("alignment_method") in ("page_boundary", "scan_frame") and not (
+        set(alignment.get("detected_ids", ())) & set(layout.expected_marker_ids)
+    ):
+        effective_masking_config = replace(
+            masking_config,
+            exclude_calibration_markers=False,
+            exclude_calibration_labels=False,
+            layout_guide_clearance_mm=0.0,
+        )
+    if alignment.get("alignment_method") == "scan_frame":
+        # Letterboxing is not part of the original document or an allowed area.
+        corners = np.asarray(alignment["source_page_corners"], dtype=np.float32)
+        transform = np.asarray(alignment["source_to_canonical"], dtype=np.float64)
+        polygon = cv2.perspectiveTransform(corners[None], transform)[0]
+        footprint = np.zeros(layout.image_shape, dtype=np.uint8)
+        cv2.fillConvexPoly(footprint, np.rint(polygon).astype(np.int32), 255)
+        # Validate the caller's mask before intersection; don't coerce malformed input.
+        require_binary_mask(allowed_region_mask, layout.image_shape, "allowed_region_mask")
+        allowed_region_mask = cv2.bitwise_and(allowed_region_mask, footprint)
+    masks = build_masks(
+        canonical,
+        allowed_region_mask,
+        layout=layout,
+        config=effective_masking_config,
+    )
     config = GenerationConfig(layout=layout)
     request = create_generation_request(canonical, masks, user_prompt, config=config, seed=seed)
     generation = run_generation(request, _offline_dependencies(config, validation_config))
