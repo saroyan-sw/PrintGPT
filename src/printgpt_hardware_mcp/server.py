@@ -21,6 +21,8 @@ from .service import HardwareService, default_service
 F = TypeVar("F", bound=Callable[..., Any])
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
+# Records an in-memory preparation and an audit line only; no device or queue change.
+PREPARE_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=False, open_world_hint=False)
 LOCAL_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False)
 PHYSICAL = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True)
 
@@ -106,7 +108,7 @@ def build_server(service: HardwareService) -> MCPServer:
         real (non-simulated) validation and printable margins. Causes no physical action."""
         return service.validate_print_artifact(artifact_path).model_dump()
 
-    @mcp.tool(title="Prepare print job (does not print)", annotations=LOCAL_WRITE)
+    @mcp.tool(title="Prepare print job (does not print)", annotations=PREPARE_ONLY)
     @_safe
     def prepare_print_job(artifact_path: str, copies: int = 1) -> dict[str, Any]:
         """DOES NOT PRINT. Validate one approved artifact and return the exact queue, file,

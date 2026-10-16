@@ -29,6 +29,8 @@ def test_tools_are_listed_with_side_effect_annotations(service):
     assert submit.annotations.destructive_hint is True and not submit.annotations.read_only_hint
     assert "USES PAPER AND TONER" in submit.description
     assert "DOES NOT PRINT" in tools["prepare_print_job"].description
+    assert tools["prepare_print_job"].annotations.read_only_hint is True
+    assert tools["import_scan"].annotations.read_only_hint is False
     assert "acquire_scan" not in tools
 
 

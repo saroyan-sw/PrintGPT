@@ -98,7 +98,8 @@ approval_mode = "prompt"
 ```
 
 `default_tools_approval_mode = "writes"` makes Codex ask before any tool not
-marked read-only; submit and cancel always prompt. Verify:
+marked read-only (`import_scan`, `submit_print_job`, `cancel_print_job`); submit and
+cancel always prompt. Verify:
 
 ```powershell
 codex mcp list
@@ -121,7 +122,7 @@ approved artifact. Do not print to test the registration.
 | `find_recent_scans(since, limit)` | Read-only |
 | `import_scan(filename, run_id, not_before?)` | Copies one file into `artifacts\hardware_mcp\imports` |
 | `validate_print_artifact(artifact_path)` | Read-only |
-| `prepare_print_job(artifact_path, copies=1)` | Records a preparation (15 min); **does not print** |
+| `prepare_print_job(artifact_path, copies=1)` | Read-only for the device: records a 15-minute preparation and an audit line; **does not print** |
 | `submit_print_job(preparation_id, artifact_sha256, confirm_physical_print, dry_run=true)` | **Prints one page; uses paper and toner** when `dry_run=false` |
 | `cancel_print_job(windows_job_id)` | Deletes a PrintGPT job from the Windows queue |
 | `acquire_scan(run_id, color_mode)` | Only when `PRINTGPT_HW_ENABLE_WIA_SCAN=1`; **starts the scanner** |
