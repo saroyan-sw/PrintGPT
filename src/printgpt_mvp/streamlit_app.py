@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from hashlib import sha256
-from uuid import uuid4
 import json
 import cv2
 
@@ -17,10 +16,12 @@ from printgpt_mvp.pipeline import (
     PRINT_AT_ACTUAL_SIZE,
     MvpRun,
     approve_and_export,
+    canonicalize_document,
     rectangular_allowed_region,
     run_offline_document,
 )
 from printgpt_mvp.input_normalization import (
+    AppliedTransform,
     InputMode,
     InputNormalizationResult,
     OrientationChoice,
@@ -43,6 +44,7 @@ def _clear_results() -> None:
         "approved_export",
         "approve_preview",
         "normalization_confirmed",
+        "generation_completed_for_preview",
     ):
         st.session_state.pop(key, None)
 
@@ -50,8 +52,66 @@ def _clear_results() -> None:
 def _clear_generation() -> None:
     import streamlit as st
 
-    for key in ("mvp_run", "approved_export", "approve_preview"):
+    for key in (
+        "mvp_run",
+        "approved_export",
+        "approve_preview",
+        "generation_completed_for_preview",
+    ):
         st.session_state.pop(key, None)
+
+
+def _registered_preview(
+    input_path: Path,
+    *,
+    page_index: int,
+    input_kind: str,
+    registration: RegistrationOptions,
+) -> InputNormalizationResult:
+    """Represent explicit physical registration in the shared preview model."""
+    canonical, alignment = canonicalize_document(
+        input_path,
+        page_index=page_index,
+        layout=DEFAULT_LAYOUT,
+        input_kind=input_kind,
+        registration=registration,
+    )
+    source = load_document(input_path, page_index=page_index, dpi=DEFAULT_LAYOUT.dpi)
+    height, width = source.image.shape[:2]
+    matrix = alignment["source_to_canonical"]
+    registered = bool(alignment.get("registration", {}).get("export_allowed"))
+    marker_ids = tuple(int(value) for value in alignment.get("detected_ids", ()))
+    return InputNormalizationResult(
+        canonical_rgb=canonical,
+        input_mode=InputMode.MARKED_PAGE if marker_ids else InputMode.SCANNER_A4,
+        source_pixel_dimensions=(width, height),
+        source_physical_dimensions_mm=tuple(alignment["registration"]["page_size_mm"]),
+        requested_orientation=OrientationChoice.AUTO,
+        selected_rotation=OrientationChoice.NO_ROTATION,
+        detected_orientation=f"physical registration: {registration.mode}",
+        applied_transform=AppliedTransform(
+            operation=f"physical_registration_{registration.mode}",
+            matrix=tuple(tuple(float(value) for value in row) for row in matrix),
+            source_dimensions=(width, height),
+            rotated_dimensions=(width, height),
+            resized_dimensions=DEFAULT_LAYOUT.raster_size_px,
+            destination_dimensions=DEFAULT_LAYOUT.raster_size_px,
+            scale_xy=(
+                DEFAULT_LAYOUT.raster_width_px / width,
+                DEFAULT_LAYOUT.raster_height_px / height,
+            ),
+            padding_ltrb=(0, 0, 0, 0),
+            interpolation="INTER_LINEAR",
+        ),
+        canonical_dimensions=DEFAULT_LAYOUT.raster_size_px,
+        confidence=1.0 if registered else 0.7,
+        confirmation_required=True,
+        warnings=tuple(alignment.get("warnings", ())),
+        marker_calibration_used=bool(marker_ids),
+        marker_ids=marker_ids,
+        physical_coordinates_calibrated=registered,
+        pdf_rotation_degrees=source.metadata.get("rotation_degrees"),
+    )
 
 
 def main() -> None:
@@ -76,17 +136,6 @@ def main() -> None:
         help="Scanner A4 explicitly bypasses markers. Marked page always requires the expected ArUco quartet.",
     )
     input_mode = InputMode(input_mode_value)
-    upload = st.file_uploader(
-        "Upload an image or PDF",
-        type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"],
-    )
-    kind_labels = {"auto": "Automatic", "scan": "Scanned page", "photo": "Photo of a page"}
-    input_kind = st.selectbox(
-        "Input type",
-        list(kind_labels),
-        format_func=kind_labels.get,
-        help="These are preview methods, not proof of physical paper position. Use registration controls below for export.",
-    )
     with st.expander("Physical page registration — required for printing onto the original"):
         st.write("A4-shaped pixels or PDF dimensions alone cannot prove that a scan is uncropped and correctly placed.")
         page_number = st.number_input("PDF page number", min_value=1, value=1, step=1)
@@ -112,6 +161,38 @@ def main() -> None:
         crop_y = st.number_input("Source top edge relative to paper top (mm)", value=0.)
         st.caption("Crop offsets may be negative for scanner borders. Crop/DPI mode assumes an unskewed scan. Use corners for skew. PDF mode preserves CropBox offsets and undoes PDF display rotation; embedded scan placement still needs checking.")
         profile_path = st.text_input("Optional measured printer profile JSON path", value="")
+
+    kind_labels = {"auto": "Automatic", "scan": "Scanned page", "photo": "Photo of a page"}
+    input_kind = st.selectbox(
+        "Input type",
+        list(kind_labels),
+        format_func=kind_labels.get,
+        help="These are preview methods, not proof of physical paper position. Use registration controls above for export.",
+    )
+    orientation_labels = {
+        OrientationChoice.AUTO.value: "Auto",
+        OrientationChoice.ROTATE_LEFT_90.value: "Rotate left 90°",
+        OrientationChoice.ROTATE_RIGHT_90.value: "Rotate right 90°",
+        OrientationChoice.ROTATE_180.value: "Rotate 180°",
+        OrientationChoice.NO_ROTATION.value: "No rotation",
+    }
+    if input_mode is InputMode.SCANNER_A4:
+        orientation_value = st.selectbox(
+            "Orientation",
+            list(orientation_labels),
+            format_func=orientation_labels.get,
+            help="Auto rotates Canon landscape A4 scans left. Override it after checking the preview.",
+        )
+        orientation = OrientationChoice(orientation_value)
+    else:
+        st.caption("Orientation is determined from the required ArUco marker positions.")
+        orientation = OrientationChoice.AUTO
+
+    upload = st.file_uploader(
+        "Upload an image or PDF",
+        type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"],
+    )
+
     prompt = st.text_input("Optional continuation prompt", placeholder="Leave blank for automatic continuation")
     st.subheader("Allowed completion rectangle (millimetres from the top-left)")
     columns = st.columns(4)
@@ -120,17 +201,44 @@ def main() -> None:
     width_mm = columns[2].number_input("Width", min_value=1.0, max_value=210.0, value=130.0, step=1.0)
     height_mm = columns[3].number_input("Height", min_value=1.0, max_value=297.0, value=180.0, step=1.0)
 
+    explicit_registration = bool(confirmed_geometry and mode != "auto")
+
     request_key = (
         sha256(upload.getvalue()).hexdigest() if upload is not None else None,
-        input_kind, prompt, x_mm, y_mm, width_mm, height_mm, page_number,
-        mode, confirmed_geometry, paper_width, paper_height, corners_text,
-        nonuniform, dpi_x, dpi_y, crop_x, crop_y, profile_path,
+        input_mode.value,
+        orientation.value,
     )
     if st.session_state.get("request_key") != request_key:
         _clear_results()
         st.session_state["request_key"] = request_key
 
-    if st.button("Prepare normalized preview", type="primary", disabled=upload is None):
+    generation_key = (
+        request_key,
+        input_kind,
+        prompt,
+        x_mm,
+        y_mm,
+        width_mm,
+        height_mm,
+        page_number,
+        mode,
+        confirmed_geometry,
+        paper_width,
+        paper_height,
+        corners_text,
+        nonuniform,
+        dpi_x,
+        dpi_y,
+        crop_x,
+        crop_y,
+        profile_path,
+    )
+    if st.session_state.get("generation_key") != generation_key:
+        _clear_generation()
+        st.session_state["generation_key"] = generation_key
+
+    prepare_label = "Generate two candidates" if explicit_registration else "Prepare normalized preview"
+    if st.button(prepare_label, type="primary", disabled=upload is None):
         _clear_results()
         try:
             assert upload is not None
@@ -141,13 +249,62 @@ def main() -> None:
             input_path.parent.mkdir(parents=True, exist_ok=True)
             input_path.write_bytes(upload.getvalue())
             with st.spinner("Loading and normalizing the selected input mode…"):
-                st.session_state["input_normalization"] = normalize_document_input(
-                    input_path,
-                    input_mode=input_mode,
-                    orientation=orientation,
-                    layout=DEFAULT_LAYOUT,
-                )
+                if confirmed_geometry and mode != "auto":
+                    st.session_state["input_normalization"] = _registered_preview(
+                        input_path,
+                        page_index=int(page_number) - 1,
+                        input_kind=input_kind,
+                        registration=RegistrationOptions(
+                            mode=mode,
+                            confirmed=True,
+                            page_size_mm=(paper_width, paper_height),
+                            corners_px=json.loads(corners_text) if corners_text.strip() else None,
+                            dpi_xy=(dpi_x, dpi_y),
+                            origin_mm=(crop_x, crop_y),
+                            allow_nonuniform_resize=nonuniform,
+                        ),
+                    )
+                else:
+                    st.session_state["input_normalization"] = normalize_document_input(
+                        input_path,
+                        input_mode=input_mode,
+                        orientation=orientation,
+                        page_index=int(page_number) - 1,
+                        layout=DEFAULT_LAYOUT,
+                    )
                 st.session_state["upload_path"] = input_path
+                if explicit_registration:
+                    allowed = rectangular_allowed_region(
+                        x_mm=x_mm,
+                        y_mm=y_mm,
+                        width_mm=width_mm,
+                        height_mm=height_mm,
+                    )
+                    normalization = st.session_state["input_normalization"]
+                    st.session_state["mvp_run"] = run_offline_document(
+                        input_path,
+                        allowed,
+                        input_path.parents[1] / "run",
+                        user_prompt=prompt,
+                        layout=DEFAULT_LAYOUT,
+                        input_mode=input_mode,
+                        orientation=orientation,
+                        normalization_result=normalization,
+                        normalization_confirmed=True,
+                        input_kind=input_kind,
+                        page_index=int(page_number) - 1,
+                        registration=RegistrationOptions(
+                            mode=mode,
+                            confirmed=True,
+                            page_size_mm=(paper_width, paper_height),
+                            corners_px=json.loads(corners_text) if corners_text.strip() else None,
+                            dpi_xy=(dpi_x, dpi_y),
+                            origin_mm=(crop_x, crop_y),
+                            allow_nonuniform_resize=nonuniform,
+                        ),
+                    )
+                    st.session_state["generation_completed_for_preview"] = True
+                    st.rerun()
         except Exception as error:
             st.error(str(error))
 
@@ -179,52 +336,53 @@ def main() -> None:
     st.image(normalization.canonical_rgb, caption="Normalized portrait A4 used by masking and generation")
     for warning in normalization.warnings:
         st.warning(warning)
-    confirmed_normalization = st.checkbox(
-        "I confirm the orientation and placement in this normalized A4 preview look correct.",
-        key="normalization_confirmed",
-    )
-
-    prompt = st.text_input("Optional continuation prompt", placeholder="Leave blank for automatic continuation")
-    st.subheader("Allowed completion rectangle (millimetres from the top-left)")
-    columns = st.columns(4)
-    x_mm = columns[0].number_input("X", min_value=0.0, max_value=209.0, value=40.0, step=1.0)
-    y_mm = columns[1].number_input("Y", min_value=0.0, max_value=296.0, value=60.0, step=1.0)
-    width_mm = columns[2].number_input("Width", min_value=1.0, max_value=210.0, value=130.0, step=1.0)
-    height_mm = columns[3].number_input("Height", min_value=1.0, max_value=297.0, value=180.0, step=1.0)
-
-    if st.button(
-        "Generate two candidates",
-        type="primary",
-        disabled=not confirmed_normalization,
-    ):
-        _clear_generation()
-        try:
-            allowed = rectangular_allowed_region(
-                x_mm=x_mm,
-                y_mm=y_mm,
-                width_mm=width_mm,
-                height_mm=height_mm,
-            )
-            input_path = Path(st.session_state["upload_path"])
-            with st.spinner("Protecting existing ink and generating two offline candidates…"):
-                st.session_state["mvp_run"] = run_offline_document(
-                    input_path,
-                    allowed,
-                    input_path.parents[1] / "run",
-                    user_prompt=prompt,
-                    layout=DEFAULT_LAYOUT,
-                    input_kind=input_kind,
-                    page_index=int(page_number)-1,
-                    registration=RegistrationOptions(
-                        mode=mode, confirmed=confirmed_geometry,
-                        page_size_mm=(paper_width, paper_height),
-                        corners_px=json.loads(corners_text) if corners_text.strip() else None,
-                        dpi_xy=(dpi_x, dpi_y), origin_mm=(crop_x, crop_y),
-                        allow_nonuniform_resize=nonuniform,
-                    ),
+    if not explicit_registration:
+        confirmed_normalization = st.checkbox(
+            "I confirm the orientation and placement in this normalized A4 preview look correct.",
+            key="normalization_confirmed",
+        )
+        if st.button(
+            "Generate two candidates",
+            type="primary",
+            disabled=(
+                not confirmed_normalization
+                or bool(st.session_state.get("generation_completed_for_preview"))
+            ),
+        ):
+            _clear_generation()
+            try:
+                allowed = rectangular_allowed_region(
+                    x_mm=x_mm,
+                    y_mm=y_mm,
+                    width_mm=width_mm,
+                    height_mm=height_mm,
                 )
-        except Exception as error:
-            st.error(str(error))
+                input_path = Path(st.session_state["upload_path"])
+                with st.spinner("Protecting existing ink and generating two offline candidates…"):
+                    st.session_state["mvp_run"] = run_offline_document(
+                        input_path,
+                        allowed,
+                        input_path.parents[1] / "run",
+                        user_prompt=prompt,
+                        layout=DEFAULT_LAYOUT,
+                        input_mode=input_mode,
+                        orientation=orientation,
+                        normalization_result=normalization,
+                        normalization_confirmed=confirmed_normalization,
+                        input_kind=input_kind,
+                        page_index=int(page_number)-1,
+                        registration=RegistrationOptions(
+                            mode=mode, confirmed=confirmed_geometry,
+                            page_size_mm=(paper_width, paper_height),
+                            corners_px=json.loads(corners_text) if corners_text.strip() else None,
+                            dpi_xy=(dpi_x, dpi_y), origin_mm=(crop_x, crop_y),
+                            allow_nonuniform_resize=nonuniform,
+                        ),
+                    )
+                    st.session_state["generation_completed_for_preview"] = True
+                    st.rerun()
+            except Exception as error:
+                st.error(str(error))
 
     run = st.session_state.get("mvp_run")
     if not isinstance(run, MvpRun):

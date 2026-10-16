@@ -129,6 +129,56 @@ def load_document(
     return DocumentPage(pixels, meta)
 
 
+def load_document_page_info(
+    input_path: str | Path,
+    *,
+    page_index: int = 0,
+    dpi: float = DEFAULT_DPI,
+    grayscale: bool = False,
+) -> LoadedDocumentPage:
+    """Load pixels together with the geometry used by input normalization.
+
+    This compatibility view is derived from :func:`load_document` so scanner
+    normalization and physical registration share one decoder and one set of
+    PDF/EXIF rules.
+    """
+    document = load_document(
+        input_path,
+        page_index=page_index,
+        dpi=dpi,
+        grayscale=grayscale,
+    )
+    height_px, width_px = document.image.shape[:2]
+    is_pdf = document.metadata.get("kind") == "pdf"
+    physical_value = document.metadata.get(
+        "page_size_mm" if is_pdf else "captured_size_mm"
+    )
+    physical = (
+        None
+        if physical_value is None
+        else (float(physical_value[0]), float(physical_value[1]))
+    )
+    dpi_value = document.metadata.get("dpi_xy")
+    source_dpi = (
+        (float(dpi), float(dpi))
+        if is_pdf
+        else (
+            None
+            if dpi_value is None
+            else (float(dpi_value[0]), float(dpi_value[1]))
+        )
+    )
+    rotation = document.metadata.get("rotation_degrees") if is_pdf else None
+    return LoadedDocumentPage(
+        pixels=document.image,
+        pixel_dimensions=(width_px, height_px),
+        physical_dimensions_mm=physical,
+        source_dpi=source_dpi,
+        pdf_rotation_degrees=None if rotation is None else int(rotation),
+        is_pdf=is_pdf,
+    )
+
+
 def load_document_page(input_path: str | Path, *, page_index: int = 0,
                        dpi: float = DEFAULT_DPI, grayscale: bool = False) -> np.ndarray:
     """Backwards-compatible pixel-only API; use load_document to retain geometry."""

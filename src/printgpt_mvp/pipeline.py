@@ -37,6 +37,12 @@ from printgpt_generation.requests import GenerationRunResult
 from printgpt_generation.track_a import TrackAValidator
 from printgpt_masking import build_masks
 
+from .input_normalization import (
+    InputMode,
+    InputNormalizationResult,
+    OrientationChoice,
+    normalize_document_input,
+)
 from .print_approval import write_print_approval
 
 
@@ -67,7 +73,7 @@ class MvpRun:
     canonical_page_rgb: np.ndarray
     masks: MaskBundle
     generation: GenerationRunResult
-    normalization: InputNormalizationResult
+    normalization: InputNormalizationResult | None
     alignment: dict[str, Any]
     generation_record_path: Path
     manifest_path: Path
@@ -104,16 +110,45 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _rgb_from_alignment(warped: np.ndarray) -> np.ndarray:
+    if warped.ndim == 2:
+        rgb = cv2.cvtColor(warped, cv2.COLOR_GRAY2RGB)
+    elif warped.ndim == 3 and warped.shape[2] == 3:
+        rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+    elif warped.ndim == 3 and warped.shape[2] == 4:
+        rgb = cv2.cvtColor(warped, cv2.COLOR_BGRA2RGB)
+    else:
+        raise ValueError(f"unsupported aligned image shape: {warped.shape}")
+    if rgb.dtype != np.uint8:
+        raise ValueError(f"aligned image must have dtype uint8, got {rgb.dtype}")
+    return np.ascontiguousarray(rgb)
+
+
 def canonicalize_document(
     input_path: str | Path,
     *,
     page_index: int = 0,
     layout: A4CalibrationLayout = DEFAULT_LAYOUT,
+    input_mode: InputMode | str | None = None,
+    orientation: OrientationChoice | str = OrientationChoice.AUTO,
     input_kind: InputKind = "auto",
     registration: RegistrationOptions | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Compatibility wrapper returning the canonical image and normalization metadata."""
+    """Canonicalize through an explicit input mode or physical registration."""
     path = Path(input_path)
+    if input_mode is not None:
+        normalization = normalize_document_input(
+            path,
+            page_index=page_index,
+            layout=layout,
+            input_mode=input_mode,
+            orientation=orientation,
+        )
+        report = normalization.to_metadata()
+        report["input_path"] = str(path)
+        report["page_index"] = page_index
+        return normalization.canonical_rgb, report
+
     source = load_document(path, page_index=page_index, dpi=layout.dpi)
     warped, report = register_document(source, layout=layout, input_kind=input_kind, options=registration)
     canonical = _rgb_from_alignment(warped)
@@ -170,7 +205,7 @@ def _offline_dependencies(config: GenerationConfig, validation: ValidationConfig
 def _manifest_payload(
     generation: GenerationRunResult,
     selected: CandidateView | None,
-    normalization: InputNormalizationResult,
+    normalization: InputNormalizationResult | None,
     *,
     approved: bool,
     exported_paths: dict[str, str | None],
@@ -181,7 +216,7 @@ def _manifest_payload(
     return {
         "schema_version": _MANIFEST_SCHEMA,
         "generation_run_id": generation.run_id,
-        "input_normalization": normalization.to_metadata(),
+        "input_normalization": None if normalization is None else normalization.to_metadata(),
         "status": generation.outcome.status.value,
         "selected_candidate": None
         if selected is None
@@ -219,30 +254,104 @@ def run_offline_document(
     layout: A4CalibrationLayout = DEFAULT_LAYOUT,
     masking_config: MaskingConfig = MaskingConfig(),
     validation_config: ValidationConfig = ValidationConfig(),
+    input_mode: InputMode | str | None = None,
+    orientation: OrientationChoice | str = OrientationChoice.AUTO,
+    normalization_result: InputNormalizationResult | None = None,
+    normalization_confirmed: bool | None = None,
     input_kind: InputKind = "auto",
     registration: RegistrationOptions | None = None,
 ) -> MvpRun:
     """Run alignment, masking, generation, validation, criticism, and selection offline."""
-    if not normalization_confirmed:
+    normalization_requested = normalization_result is not None or input_mode is not None
+    if normalization_requested and normalization_confirmed is not True:
         raise PermissionError("normalized page preview confirmation is required before generation")
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
-    canonical, alignment = canonicalize_document(
-        input_path, page_index=page_index, layout=layout, input_kind=input_kind, registration=registration
-    )
-    if normalization.input_mode is not InputMode(input_mode):
-        raise ValueError("normalization result input mode does not match the requested mode")
-    if normalization.canonical_dimensions != layout.raster_size_px:
-        raise ValueError("normalization result canonical dimensions do not match the layout")
-    canonical = normalization.canonical_rgb
-    alignment = normalization.to_metadata()
+
+    normalization = normalization_result
+    if normalization_requested and normalization is None:
+        assert input_mode is not None
+        normalization = normalize_document_input(
+            input_path,
+            page_index=page_index,
+            layout=layout,
+            input_mode=input_mode,
+            orientation=orientation,
+        )
+    if normalization is not None:
+        if input_mode is not None and normalization.input_mode is not InputMode(input_mode):
+            raise ValueError("normalization result input mode does not match the requested mode")
+        if normalization.canonical_dimensions != layout.raster_size_px:
+            raise ValueError("normalization result canonical dimensions do not match the layout")
+
+    # Explicit registration establishes physical paper coordinates. Without it,
+    # the confirmed scanner/marker preview remains the generation coordinate
+    # source and scanner pages stay preview-only for physical export.
+    if normalization is None or registration is not None:
+        canonical, alignment = canonicalize_document(
+            input_path,
+            page_index=page_index,
+            layout=layout,
+            input_kind=input_kind,
+            registration=registration,
+        )
+        if normalization is not None:
+            metadata = normalization.to_metadata()
+            alignment["input_normalization"] = metadata
+            alignment["input_mode"] = normalization.input_mode.value
+            alignment["marker_calibration_used"] = normalization.marker_calibration_used
+            alignment["selected_rotation"] = normalization.selected_rotation.value
+    else:
+        canonical = normalization.canonical_rgb
+        alignment = normalization.to_metadata()
+        transform = np.asarray(normalization.applied_transform.matrix, dtype=np.float64)
+        width, height = normalization.source_pixel_dimensions
+        source_corners = np.asarray(
+            [[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32
+        )
+        observed = cv2.perspectiveTransform(source_corners[None], transform)[0]
+        canonical_to_mm = np.asarray(
+            (
+                (layout.page_width_mm / layout.raster_width_px, 0, 0),
+                (0, layout.page_height_mm / layout.raster_height_px, 0),
+                (0, 0, 1),
+            ),
+            dtype=np.float64,
+        )
+        registered = normalization.marker_calibration_used
+        alignment.update(
+            alignment_method="aruco" if registered else "scanner_a4",
+            input_kind="auto" if registered else "scan",
+            source_to_canonical=transform.tolist(),
+            canonical_to_source=np.linalg.inv(transform).tolist(),
+            observed_polygon_canonical_px=observed.tolist(),
+            registration={
+                "status": "registered" if registered else "preview_only",
+                "export_allowed": registered,
+                "evidence": "ArUco marker geometry" if registered else "scanner A4 normalization only",
+                "options": {"mode": "aruco" if registered else "scanner_a4"},
+                "page_size_mm": [layout.page_width_mm, layout.page_height_mm],
+                "scale_and_origin": "established by markers" if registered else "unconfirmed",
+                "printer_accuracy": "unmeasured",
+            },
+            coordinate_system={
+                "origin": "physical paper top-left",
+                "axes": "x right, y down",
+                "convention": "outer pixel edges; raster spans exact page dimensions",
+                "canonical_px_to_mm": canonical_to_mm.tolist(),
+                "source_to_mm": (canonical_to_mm @ transform).tolist(),
+            },
+        )
     alignment["input_path"] = str(Path(input_path))
     alignment["page_index"] = page_index
     _write_json(root / "alignment.json", alignment)
     effective_masking_config = masking_config
-    if alignment.get("alignment_method") != "aruco" and not (
-        set(alignment.get("detected_ids", ())) & set(layout.expected_marker_ids)
-    ):
+    marker_calibrated = bool(
+        (normalization is not None and normalization.marker_calibration_used)
+        or alignment.get("alignment_method") == "aruco"
+        or (set(alignment.get("detected_ids", ())) & set(layout.expected_marker_ids))
+    )
+    if not marker_calibrated:
         effective_masking_config = replace(
             masking_config,
             exclude_calibration_markers=False,
@@ -411,7 +520,8 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
     }
     _write_json(
         run.manifest_path,
-        _manifest_payload(run.generation, selected, approved=True, exported_paths=exported,
+        _manifest_payload(run.generation, selected, run.normalization,
+                          approved=True, exported_paths=exported,
                           alignment=run.alignment, printer=printer_profile),
     )
     registration = run.alignment.get("registration") or {}
