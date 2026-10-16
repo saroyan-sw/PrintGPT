@@ -49,6 +49,13 @@ Print the PDF at **100% / Actual Size** with Fit, Shrink, borderless expansion,
 and automatic rotation disabled. See [`docs/mvp.md`](docs/mvp.md) for the
 end-to-end contract and physical-printer limitations.
 
+Scans can also arrive by email: choose **Scan source → Scanner email (Gmail)**
+and press **Start waiting for scan**, then use the Canon's Scan and Send. The
+app imports the newest scanner attachment with read-only Gmail access and
+shows the same corrected A4 preview. Setup is in
+[`docs/GMAIL_SCAN_INGESTION.md`](docs/GMAIL_SCAN_INGESTION.md) (install
+`.[app,gmail]`); manual upload stays available.
+
 The next physical-registration task is specified in
 [`docs/PHYSICAL_ALIGNMENT_HANDOFF.md`](docs/PHYSICAL_ALIGNMENT_HANDOFF.md).
 

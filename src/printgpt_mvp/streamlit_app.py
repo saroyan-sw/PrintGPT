@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from hashlib import sha256
+from typing import Any
 
 from printgpt_alignment import DEFAULT_LAYOUT
 
@@ -20,6 +21,25 @@ from printgpt_mvp.input_normalization import (
     OrientationChoice,
     normalize_document_input,
 )
+from printgpt_mvp.email_ingestion import factory as email_factory
+from printgpt_mvp.email_ingestion.models import PollOutcome, ScanSessionStatus
+
+_UPLOAD_SOURCE = "upload"
+_EMAIL_SOURCE = "email"
+_EMAIL_PROGRESS = {
+    ScanSessionStatus.WAITING_FOR_EMAIL: "Waiting for scanner email…",
+    ScanSessionStatus.NEEDS_SELECTION: "Email found — choose the attachment to import",
+    ScanSessionStatus.EMAIL_FOUND: "Email found",
+    ScanSessionStatus.DOWNLOADING: "Downloading attachment…",
+    ScanSessionStatus.DOWNLOADED: "Attachment downloaded",
+    ScanSessionStatus.VALIDATING: "Validating scan…",
+    ScanSessionStatus.IMPORTED: "Scan imported",
+    ScanSessionStatus.NORMALIZING: "Normalizing A4…",
+    ScanSessionStatus.AWAITING_CONFIRMATION: "Scan ready — confirm the preview below",
+    ScanSessionStatus.FAILED: "Scan import failed",
+    ScanSessionStatus.TIMED_OUT: "No scanner email arrived before the timeout",
+    ScanSessionStatus.CANCELLED: "Waiting cancelled",
+}
 
 
 def _candidate_label(run: MvpRun, attempt_id: str) -> str:
@@ -48,53 +68,16 @@ def _clear_generation() -> None:
         st.session_state.pop(key, None)
 
 
-def main() -> None:
+def _upload_source(input_mode: InputMode, orientation: OrientationChoice) -> None:
     import streamlit as st
 
-    st.set_page_config(page_title="PrintGPT MVP", layout="wide")
-    st.title("PrintGPT — safe A4 completion preview")
-    st.caption(
-        "Choose either a full-page A4 scanner export or a marked calibration page. Output uses A4. "
-        "This offline demonstration uses deterministic generator and critic doubles — not live Gemini. "
-        "Nothing is exported until you explicitly approve a validated preview."
-    )
-
-    mode_labels = {
-        InputMode.SCANNER_A4.value: "Scanner A4",
-        InputMode.MARKED_PAGE.value: "Marked page (ArUco)",
-    }
-    input_mode_value = st.selectbox(
-        "Input mode",
-        list(mode_labels),
-        format_func=mode_labels.get,
-        help="Scanner A4 explicitly bypasses markers. Marked page always requires the expected ArUco quartet.",
-    )
-    input_mode = InputMode(input_mode_value)
     upload = st.file_uploader(
         "Upload an image or PDF",
         type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"],
     )
 
-    orientation_labels = {
-        OrientationChoice.AUTO.value: "Auto",
-        OrientationChoice.ROTATE_LEFT_90.value: "Rotate left 90°",
-        OrientationChoice.ROTATE_RIGHT_90.value: "Rotate right 90°",
-        OrientationChoice.ROTATE_180.value: "Rotate 180°",
-        OrientationChoice.NO_ROTATION.value: "No rotation",
-    }
-    if input_mode is InputMode.SCANNER_A4:
-        orientation_value = st.selectbox(
-            "Orientation",
-            list(orientation_labels),
-            format_func=orientation_labels.get,
-            help="Auto uses the Canon scanner profile for landscape A4. Override it after checking the preview.",
-        )
-        orientation = OrientationChoice(orientation_value)
-    else:
-        st.caption("Orientation is determined from the required ArUco marker positions.")
-        orientation = OrientationChoice.AUTO
-
     request_key = (
+        _UPLOAD_SOURCE,
         sha256(upload.getvalue()).hexdigest() if upload is not None else None,
         input_mode.value,
         orientation.value,
@@ -123,6 +106,173 @@ def main() -> None:
                 st.session_state["upload_path"] = input_path
         except Exception as error:
             st.error(str(error))
+
+
+def _email_connection(settings: Any) -> Any:
+    """Connect without a browser first; the Connect button runs Google consent."""
+    import streamlit as st
+
+    connection = st.session_state.get("email_connection")
+    if connection is None or not connection.connected:
+        connection = email_factory.connect_email_scan_service(settings, allow_browser=False)
+        st.session_state["email_connection"] = connection
+    return connection
+
+
+def _poll_email_session(service: Any, session_id: str) -> None:
+    """Fragment body: one non-blocking inbox check per run."""
+    import streamlit as st
+
+    result = service.poll_scan_session(session_id)
+    session = result.session
+    st.info(_EMAIL_PROGRESS.get(session.status, session.status.value))
+    if result.detail and result.outcome is PollOutcome.WAITING:
+        st.caption(result.detail)
+    if result.outcome is PollOutcome.NEEDS_SELECTION:
+        labels = {
+            f"{item.message_id}/{item.attachment_id}": f"{item.filename} ({item.mime_type}, {item.size_bytes} bytes)"
+            for item in session.selection_candidates
+        }
+        choice = st.radio("Several scan attachments arrived — choose one", list(labels), format_func=labels.get)
+        if st.button("Import selected attachment"):
+            message_id, attachment_id = choice.split("/", 1)
+            service.import_selected_scan(session_id, message_id, attachment_id)
+            st.rerun()
+    elif result.outcome is not PollOutcome.WAITING:
+        # Leave the fragment so the whole page renders the final state.
+        st.rerun()
+
+
+def _email_scan_source(input_mode: InputMode, orientation: OrientationChoice) -> None:
+    import streamlit as st
+    from pydantic import ValidationError
+
+    try:
+        settings = email_factory.load_settings()
+    except ValidationError:
+        st.warning(
+            "Scanner email is not configured. Set PRINTGPT_GMAIL_ACCOUNT, PRINTGPT_SCAN_SENDER and "
+            "PRINTGPT_GMAIL_CREDENTIALS_PATH in the local .env file (see docs/GMAIL_SCAN_INGESTION.md)."
+        )
+        return
+
+    connection = _email_connection(settings)
+    if not connection.connected:
+        st.warning(connection.message)
+        if st.button("Connect Gmail (read-only)"):
+            with st.spinner("Complete Google consent in the browser window that opened…"):
+                st.session_state["email_connection"] = email_factory.connect_email_scan_service(
+                    settings, allow_browser=True
+                )
+            st.rerun()
+        return
+    service = connection.service
+    st.success("Gmail connected (read-only).")
+
+    session_id = st.session_state.get("email_scan_session_id")
+    session = service.get_scan_session_status(session_id) if session_id else None
+    waiting = session is not None and session.status in (
+        ScanSessionStatus.WAITING_FOR_EMAIL,
+        ScanSessionStatus.NEEDS_SELECTION,
+    )
+    if not waiting and st.button("Start waiting for scan", type="primary"):
+        _clear_results()
+        session = service.start_scan_session()
+        st.session_state["email_scan_session_id"] = session.session_id
+        waiting = True
+
+    if waiting:
+        assert session is not None
+        st.markdown(
+            "1. Place the page on the Canon glass or document feeder.\n"
+            "2. Choose **Scan and Send** and send it to the configured Gmail address.\n"
+            f"3. Keep this page open. The inbox is checked every {settings.poll_interval_s:.0f} s "
+            f"for up to {settings.timeout_s / 60:.0f} minutes."
+        )
+        st.fragment(run_every=settings.poll_interval_s)(_poll_email_session)(service, session.session_id)
+        if st.button("Cancel waiting"):
+            service.cancel_scan_session(session.session_id)
+            st.rerun()
+        return
+    if session is None:
+        return
+
+    if session.status in (ScanSessionStatus.FAILED, ScanSessionStatus.TIMED_OUT, ScanSessionStatus.CANCELLED):
+        st.error(f"{_EMAIL_PROGRESS[session.status]}. {session.error or ''}".strip())
+        return
+    st.caption(
+        f"Imported **{session.original_filename}** ({session.mime_type}, {session.size_bytes} bytes) "
+        f"from the scanner email received {session.received_at:%Y-%m-%d %H:%M} UTC."
+    )
+    request_key = (_EMAIL_SOURCE, session.session_id, input_mode.value, orientation.value)
+    if st.session_state.get("request_key") != request_key:
+        _clear_results()
+        st.session_state["request_key"] = request_key
+    if "input_normalization" not in st.session_state:
+        try:
+            with st.spinner("Normalizing A4…"):
+                _, normalization = service.normalize_imported_scan(
+                    session.session_id, input_mode=input_mode, orientation=orientation, layout=DEFAULT_LAYOUT
+                )
+        except (ValueError, IndexError) as error:
+            st.error(str(error))
+            return
+        st.session_state["input_normalization"] = normalization
+        st.session_state["upload_path"] = Path(session.imported_path)
+
+
+def main() -> None:
+    import streamlit as st
+
+    st.set_page_config(page_title="PrintGPT MVP", layout="wide")
+    st.title("PrintGPT — safe A4 completion preview")
+    st.caption(
+        "Choose either a full-page A4 scanner export or a marked calibration page. Output uses A4. "
+        "This offline demonstration uses deterministic generator and critic doubles — not live Gemini. "
+        "Nothing is exported until you explicitly approve a validated preview."
+    )
+
+    mode_labels = {
+        InputMode.SCANNER_A4.value: "Scanner A4",
+        InputMode.MARKED_PAGE.value: "Marked page (ArUco)",
+    }
+    input_mode_value = st.selectbox(
+        "Input mode",
+        list(mode_labels),
+        format_func=mode_labels.get,
+        help="Scanner A4 explicitly bypasses markers. Marked page always requires the expected ArUco quartet.",
+    )
+    input_mode = InputMode(input_mode_value)
+    orientation_labels = {
+        OrientationChoice.AUTO.value: "Auto",
+        OrientationChoice.ROTATE_LEFT_90.value: "Rotate left 90°",
+        OrientationChoice.ROTATE_RIGHT_90.value: "Rotate right 90°",
+        OrientationChoice.ROTATE_180.value: "Rotate 180°",
+        OrientationChoice.NO_ROTATION.value: "No rotation",
+    }
+    if input_mode is InputMode.SCANNER_A4:
+        orientation_value = st.selectbox(
+            "Orientation",
+            list(orientation_labels),
+            format_func=orientation_labels.get,
+            help="Auto uses the Canon scanner profile for landscape A4. Override it after checking the preview.",
+        )
+        orientation = OrientationChoice(orientation_value)
+    else:
+        st.caption("Orientation is determined from the required ArUco marker positions.")
+        orientation = OrientationChoice.AUTO
+
+    source = st.radio(
+        "Scan source",
+        [_UPLOAD_SOURCE, _EMAIL_SOURCE],
+        format_func={_UPLOAD_SOURCE: "Upload a file", _EMAIL_SOURCE: "Scanner email (Gmail)"}.get,
+        horizontal=True,
+        help="Scanner email imports the newest Canon Scan and Send message automatically; upload stays available.",
+    )
+    if source == _EMAIL_SOURCE:
+        _email_scan_source(input_mode, orientation)
+    else:
+        _upload_source(input_mode, orientation)
 
     normalization = st.session_state.get("input_normalization")
     if not isinstance(normalization, InputNormalizationResult):
