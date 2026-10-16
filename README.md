@@ -65,6 +65,16 @@ submit **one** approved toner-only A4 page with explicit confirmation. See
 safe printing workflow, and [`docs/HARDWARE_AUDIT.md`](docs/HARDWARE_AUDIT.md) for the
 audited hardware facts.
 
+Scans can also arrive by email: choose **Scan source → Scanner email (Gmail)**
+and press **Start waiting for scan**, then use the Canon's Scan and Send. The
+app imports the newest scanner attachment with read-only Gmail access and
+shows the same corrected A4 preview. Setup is in
+[`docs/GMAIL_SCAN_INGESTION.md`](docs/GMAIL_SCAN_INGESTION.md) (install
+`.[app,gmail]`); manual upload stays available.
+
+The next physical-registration task is specified in
+[`docs/PHYSICAL_ALIGNMENT_HANDOFF.md`](docs/PHYSICAL_ALIGNMENT_HANDOFF.md).
+
 ## Guided notebook
 
 Open [`notebooks/04_physical_alignment.ipynb`](notebooks/04_physical_alignment.ipynb)

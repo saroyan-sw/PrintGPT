@@ -34,6 +34,12 @@ hardware = [
     "mcp==2.3.0",
     "pywin32>=306; sys_platform == 'win32'",
 ]
+gmail = [
+    "google-api-python-client>=2.150,<3",
+    "google-auth>=2.35,<3",
+    "google-auth-httplib2>=0.2,<1",
+    "google-auth-oauthlib>=1.2,<2",
+]
 
 [project.scripts]
 printgpt-align = "printgpt_alignment.cli:main"

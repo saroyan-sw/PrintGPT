@@ -19,3 +19,13 @@ artifacts/
 
 # Licensed external evaluation data (keep local; do not redistribute)
 /data/scanned_docs/
+
+# Gmail OAuth client secrets and tokens (keep outside Git; prefer %LOCALAPPDATA%\PrintGPT)
+client_secret*.json
+client_secrets*.json
+credentials*.json
+*credentials*.json
+gmail_token*.json
+token*.json
+*.token
+*.pickle

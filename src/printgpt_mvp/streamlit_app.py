@@ -6,6 +6,7 @@ from pathlib import Path
 from hashlib import sha256
 import json
 import cv2
+from typing import Any
 
 from printgpt_alignment import DEFAULT_LAYOUT
 from printgpt_alignment.document import load_document
@@ -27,6 +28,25 @@ from printgpt_mvp.input_normalization import (
     OrientationChoice,
     normalize_document_input,
 )
+from printgpt_mvp.email_ingestion import factory as email_factory
+from printgpt_mvp.email_ingestion.models import PollOutcome, ScanSessionStatus
+
+_UPLOAD_SOURCE = "upload"
+_EMAIL_SOURCE = "email"
+_EMAIL_PROGRESS = {
+    ScanSessionStatus.WAITING_FOR_EMAIL: "Waiting for scanner email…",
+    ScanSessionStatus.NEEDS_SELECTION: "Email found — choose the attachment to import",
+    ScanSessionStatus.EMAIL_FOUND: "Email found",
+    ScanSessionStatus.DOWNLOADING: "Downloading attachment…",
+    ScanSessionStatus.DOWNLOADED: "Attachment downloaded",
+    ScanSessionStatus.VALIDATING: "Validating scan…",
+    ScanSessionStatus.IMPORTED: "Scan imported",
+    ScanSessionStatus.NORMALIZING: "Normalizing A4…",
+    ScanSessionStatus.AWAITING_CONFIRMATION: "Scan ready — confirm the preview below",
+    ScanSessionStatus.FAILED: "Scan import failed",
+    ScanSessionStatus.TIMED_OUT: "No scanner email arrived before the timeout",
+    ScanSessionStatus.CANCELLED: "Waiting cancelled",
+}
 
 
 def _candidate_label(run: MvpRun, attempt_id: str) -> str:
@@ -114,6 +134,119 @@ def _registered_preview(
     )
 
 
+def _email_connection(settings: Any) -> Any:
+    """Connect without a browser first; the Connect button runs Google consent."""
+    import streamlit as st
+
+    connection = st.session_state.get("email_connection")
+    if connection is None or not connection.connected:
+        connection = email_factory.connect_email_scan_service(settings, allow_browser=False)
+        st.session_state["email_connection"] = connection
+    return connection
+
+
+def _poll_email_session(service: Any, session_id: str) -> None:
+    """Fragment body: one non-blocking inbox check per run."""
+    import streamlit as st
+
+    result = service.poll_scan_session(session_id)
+    session = result.session
+    st.info(_EMAIL_PROGRESS.get(session.status, session.status.value))
+    if result.detail and result.outcome is PollOutcome.WAITING:
+        st.caption(result.detail)
+    if result.outcome is PollOutcome.NEEDS_SELECTION:
+        labels = {
+            f"{item.message_id}/{item.attachment_id}": f"{item.filename} ({item.mime_type}, {item.size_bytes} bytes)"
+            for item in session.selection_candidates
+        }
+        choice = st.radio("Several scan attachments arrived — choose one", list(labels), format_func=labels.get)
+        if st.button("Import selected attachment"):
+            message_id, attachment_id = choice.split("/", 1)
+            service.import_selected_scan(session_id, message_id, attachment_id)
+            st.rerun()
+    elif result.outcome is not PollOutcome.WAITING:
+        # Leave the fragment so the whole page renders the final state.
+        st.rerun()
+
+
+def _email_scan_source(input_mode: InputMode, orientation: OrientationChoice) -> None:
+    import streamlit as st
+    from pydantic import ValidationError
+
+    try:
+        settings = email_factory.load_settings()
+    except ValidationError:
+        st.warning(
+            "Scanner email is not configured. Set PRINTGPT_GMAIL_ACCOUNT, PRINTGPT_SCAN_SENDER and "
+            "PRINTGPT_GMAIL_CREDENTIALS_PATH in the local .env file (see docs/GMAIL_SCAN_INGESTION.md)."
+        )
+        return
+
+    connection = _email_connection(settings)
+    if not connection.connected:
+        st.warning(connection.message)
+        if st.button("Connect Gmail (read-only)"):
+            with st.spinner("Complete Google consent in the browser window that opened…"):
+                st.session_state["email_connection"] = email_factory.connect_email_scan_service(
+                    settings, allow_browser=True
+                )
+            st.rerun()
+        return
+    service = connection.service
+    st.success("Gmail connected (read-only).")
+
+    session_id = st.session_state.get("email_scan_session_id")
+    session = service.get_scan_session_status(session_id) if session_id else None
+    waiting = session is not None and session.status in (
+        ScanSessionStatus.WAITING_FOR_EMAIL,
+        ScanSessionStatus.NEEDS_SELECTION,
+    )
+    if not waiting and st.button("Start waiting for scan", type="primary"):
+        _clear_results()
+        session = service.start_scan_session()
+        st.session_state["email_scan_session_id"] = session.session_id
+        waiting = True
+
+    if waiting:
+        assert session is not None
+        st.markdown(
+            "1. Place the page on the Canon glass or document feeder.\n"
+            "2. Choose **Scan and Send** and send it to the configured Gmail address.\n"
+            f"3. Keep this page open. The inbox is checked every {settings.poll_interval_s:.0f} s "
+            f"for up to {settings.timeout_s / 60:.0f} minutes."
+        )
+        st.fragment(run_every=settings.poll_interval_s)(_poll_email_session)(service, session.session_id)
+        if st.button("Cancel waiting"):
+            service.cancel_scan_session(session.session_id)
+            st.rerun()
+        return
+    if session is None:
+        return
+
+    if session.status in (ScanSessionStatus.FAILED, ScanSessionStatus.TIMED_OUT, ScanSessionStatus.CANCELLED):
+        st.error(f"{_EMAIL_PROGRESS[session.status]}. {session.error or ''}".strip())
+        return
+    st.caption(
+        f"Imported **{session.original_filename}** ({session.mime_type}, {session.size_bytes} bytes) "
+        f"from the scanner email received {session.received_at:%Y-%m-%d %H:%M} UTC."
+    )
+    request_key = (_EMAIL_SOURCE, session.session_id, input_mode.value, orientation.value)
+    if st.session_state.get("request_key") != request_key:
+        _clear_results()
+        st.session_state["request_key"] = request_key
+    if "input_normalization" not in st.session_state:
+        try:
+            with st.spinner("Normalizing A4…"):
+                _, normalization = service.normalize_imported_scan(
+                    session.session_id, input_mode=input_mode, orientation=orientation, layout=DEFAULT_LAYOUT
+                )
+        except (ValueError, IndexError) as error:
+            st.error(str(error))
+            return
+        st.session_state["input_normalization"] = normalization
+        st.session_state["upload_path"] = Path(session.imported_path)
+
+
 def main() -> None:
     import streamlit as st
 
@@ -147,19 +280,38 @@ def main() -> None:
             "crop": "Cropped scan: known DPI and measured paper offset",
         }
         mode = st.selectbox("Registration method", list(modes), format_func=modes.get)
-        confirmed_geometry = st.selectbox("Geometry confirmation", [False, True],
-            format_func=lambda v: "I verified the paper size, orientation, scale and origin" if v else "Not verified — preview only")
-        paper_width = st.number_input("Actual paper width (mm)", min_value=1., value=210.)
-        paper_height = st.number_input("Actual paper height (mm)", min_value=1., value=297.)
-        corners_text = st.text_area("Paper corners in source pixels: [[TL x,y],[TR x,y],[BR x,y],[BL x,y]]", value="",
-            help="Use the true paper edges, not the text box. Order by the physical sheet's reading orientation. Inspect source pixels in the geometry panel after a preview run.")
-        nonuniform = st.selectbox("Complete sheet was nonuniformly resized", [False, True],
-            help="Only enable if the whole sheet is present and has been stretched. This is NOT a way to repair a crop.")
-        dpi_x = st.number_input("Measured scan DPI X", min_value=1., value=300.)
-        dpi_y = st.number_input("Measured scan DPI Y", min_value=1., value=300.)
-        crop_x = st.number_input("Source left edge relative to paper left (mm)", value=0.)
-        crop_y = st.number_input("Source top edge relative to paper top (mm)", value=0.)
-        st.caption("Crop offsets may be negative for scanner borders. Crop/DPI mode assumes an unskewed scan. Use corners for skew. PDF mode preserves CropBox offsets and undoes PDF display rotation; embedded scan placement still needs checking.")
+        confirmed_geometry = st.selectbox(
+            "Geometry confirmation",
+            [False, True],
+            format_func=lambda value: (
+                "I verified the paper size, orientation, scale and origin"
+                if value
+                else "Not verified — preview only"
+            ),
+        )
+        paper_width = st.number_input("Actual paper width (mm)", min_value=1.0, value=210.0)
+        paper_height = st.number_input("Actual paper height (mm)", min_value=1.0, value=297.0)
+        corners_text = st.text_area(
+            "Paper corners in source pixels: [[TL x,y],[TR x,y],[BR x,y],[BL x,y]]",
+            value="",
+            help=(
+                "Use the true paper edges, not the text box. Order by the physical sheet's reading "
+                "orientation. Inspect source pixels in the geometry panel after a preview run."
+            ),
+        )
+        nonuniform = st.selectbox(
+            "Complete sheet was nonuniformly resized",
+            [False, True],
+            help="Only enable if the whole sheet is present and has been stretched. This is not a crop repair.",
+        )
+        dpi_x = st.number_input("Measured scan DPI X", min_value=1.0, value=300.0)
+        dpi_y = st.number_input("Measured scan DPI Y", min_value=1.0, value=300.0)
+        crop_x = st.number_input("Source left edge relative to paper left (mm)", value=0.0)
+        crop_y = st.number_input("Source top edge relative to paper top (mm)", value=0.0)
+        st.caption(
+            "Crop offsets may be negative for scanner borders. Crop/DPI mode assumes an unskewed scan. "
+            "Use corners for skew. PDF mode preserves CropBox offsets and undoes PDF display rotation."
+        )
         profile_path = st.text_input("Optional measured printer profile JSON path", value="")
 
     kind_labels = {"auto": "Automatic", "scan": "Scanned page", "photo": "Photo of a page"}
@@ -167,7 +319,7 @@ def main() -> None:
         "Input type",
         list(kind_labels),
         format_func=kind_labels.get,
-        help="These are preview methods, not proof of physical paper position. Use registration controls above for export.",
+        help="Preview method only; use registration controls above to establish physical paper coordinates.",
     )
     orientation_labels = {
         OrientationChoice.AUTO.value: "Auto",
@@ -188,10 +340,34 @@ def main() -> None:
         st.caption("Orientation is determined from the required ArUco marker positions.")
         orientation = OrientationChoice.AUTO
 
-    upload = st.file_uploader(
-        "Upload an image or PDF",
-        type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"],
+    source = st.radio(
+        "Scan source",
+        [_UPLOAD_SOURCE, _EMAIL_SOURCE],
+        format_func={_UPLOAD_SOURCE: "Upload a file", _EMAIL_SOURCE: "Scanner email (Gmail)"}.get,
+        horizontal=True,
+        help="Scanner email imports the newest Canon Scan and Send message automatically; upload stays available.",
     )
+    if st.session_state.get("scan_source") != source:
+        _clear_results()
+        st.session_state["scan_source"] = source
+
+    upload = None
+    if source == _EMAIL_SOURCE:
+        _email_scan_source(input_mode, orientation)
+    else:
+        upload = st.file_uploader(
+            "Upload an image or PDF",
+            type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"],
+        )
+        request_key = (
+            _UPLOAD_SOURCE,
+            sha256(upload.getvalue()).hexdigest() if upload is not None else None,
+            input_mode.value,
+            orientation.value,
+        )
+        if st.session_state.get("request_key") != request_key:
+            _clear_results()
+            st.session_state["request_key"] = request_key
 
     prompt = st.text_input("Optional continuation prompt", placeholder="Leave blank for automatic continuation")
     st.subheader("Allowed completion rectangle (millimetres from the top-left)")
@@ -201,19 +377,11 @@ def main() -> None:
     width_mm = columns[2].number_input("Width", min_value=1.0, max_value=210.0, value=130.0, step=1.0)
     height_mm = columns[3].number_input("Height", min_value=1.0, max_value=297.0, value=180.0, step=1.0)
 
-    explicit_registration = bool(confirmed_geometry and mode != "auto")
-
-    request_key = (
-        sha256(upload.getvalue()).hexdigest() if upload is not None else None,
-        input_mode.value,
-        orientation.value,
+    explicit_registration = bool(
+        source == _UPLOAD_SOURCE and confirmed_geometry and mode != "auto"
     )
-    if st.session_state.get("request_key") != request_key:
-        _clear_results()
-        st.session_state["request_key"] = request_key
-
     generation_key = (
-        request_key,
+        st.session_state.get("request_key"),
         input_kind,
         prompt,
         x_mm,
@@ -237,76 +405,70 @@ def main() -> None:
         _clear_generation()
         st.session_state["generation_key"] = generation_key
 
-    prepare_label = "Generate two candidates" if explicit_registration else "Prepare normalized preview"
-    if st.button(prepare_label, type="primary", disabled=upload is None):
-        _clear_results()
-        try:
-            assert upload is not None
-            upload_digest = sha256(upload.getvalue()).hexdigest()
-            run_root = Path("artifacts/streamlit") / upload_digest[:12]
-            suffix = Path(upload.name).suffix.lower() if upload is not None else ".png"
-            input_path = run_root / "input" / f"upload{suffix}"
-            input_path.parent.mkdir(parents=True, exist_ok=True)
-            input_path.write_bytes(upload.getvalue())
-            with st.spinner("Loading and normalizing the selected input mode…"):
-                if confirmed_geometry and mode != "auto":
-                    st.session_state["input_normalization"] = _registered_preview(
-                        input_path,
-                        page_index=int(page_number) - 1,
-                        input_kind=input_kind,
-                        registration=RegistrationOptions(
-                            mode=mode,
-                            confirmed=True,
-                            page_size_mm=(paper_width, paper_height),
-                            corners_px=json.loads(corners_text) if corners_text.strip() else None,
-                            dpi_xy=(dpi_x, dpi_y),
-                            origin_mm=(crop_x, crop_y),
-                            allow_nonuniform_resize=nonuniform,
-                        ),
+    if source == _UPLOAD_SOURCE:
+        prepare_label = "Generate two candidates" if explicit_registration else "Prepare normalized preview"
+        if st.button(prepare_label, type="primary", disabled=upload is None):
+            _clear_results()
+            try:
+                assert upload is not None
+                upload_digest = sha256(upload.getvalue()).hexdigest()
+                run_root = Path("artifacts/streamlit") / upload_digest[:12]
+                suffix = Path(upload.name).suffix.lower()
+                input_path = run_root / "input" / f"upload{suffix}"
+                input_path.parent.mkdir(parents=True, exist_ok=True)
+                input_path.write_bytes(upload.getvalue())
+                with st.spinner("Loading and normalizing the selected input mode…"):
+                    registration = RegistrationOptions(
+                        mode=mode,
+                        confirmed=confirmed_geometry,
+                        page_size_mm=(paper_width, paper_height),
+                        corners_px=json.loads(corners_text) if corners_text.strip() else None,
+                        dpi_xy=(dpi_x, dpi_y),
+                        origin_mm=(crop_x, crop_y),
+                        allow_nonuniform_resize=nonuniform,
                     )
-                else:
-                    st.session_state["input_normalization"] = normalize_document_input(
-                        input_path,
-                        input_mode=input_mode,
-                        orientation=orientation,
-                        page_index=int(page_number) - 1,
-                        layout=DEFAULT_LAYOUT,
-                    )
-                st.session_state["upload_path"] = input_path
-                if explicit_registration:
-                    allowed = rectangular_allowed_region(
-                        x_mm=x_mm,
-                        y_mm=y_mm,
-                        width_mm=width_mm,
-                        height_mm=height_mm,
-                    )
-                    normalization = st.session_state["input_normalization"]
-                    st.session_state["mvp_run"] = run_offline_document(
-                        input_path,
-                        allowed,
-                        input_path.parents[1] / "run",
-                        user_prompt=prompt,
-                        layout=DEFAULT_LAYOUT,
-                        input_mode=input_mode,
-                        orientation=orientation,
-                        normalization_result=normalization,
-                        normalization_confirmed=True,
-                        input_kind=input_kind,
-                        page_index=int(page_number) - 1,
-                        registration=RegistrationOptions(
-                            mode=mode,
-                            confirmed=True,
-                            page_size_mm=(paper_width, paper_height),
-                            corners_px=json.loads(corners_text) if corners_text.strip() else None,
-                            dpi_xy=(dpi_x, dpi_y),
-                            origin_mm=(crop_x, crop_y),
-                            allow_nonuniform_resize=nonuniform,
-                        ),
-                    )
-                    st.session_state["generation_completed_for_preview"] = True
-                    st.rerun()
-        except Exception as error:
-            st.error(str(error))
+                    if explicit_registration:
+                        normalization = _registered_preview(
+                            input_path,
+                            page_index=int(page_number) - 1,
+                            input_kind=input_kind,
+                            registration=registration,
+                        )
+                    else:
+                        normalization = normalize_document_input(
+                            input_path,
+                            input_mode=input_mode,
+                            orientation=orientation,
+                            page_index=int(page_number) - 1,
+                            layout=DEFAULT_LAYOUT,
+                        )
+                    st.session_state["input_normalization"] = normalization
+                    st.session_state["upload_path"] = input_path
+                    if explicit_registration:
+                        allowed = rectangular_allowed_region(
+                            x_mm=x_mm,
+                            y_mm=y_mm,
+                            width_mm=width_mm,
+                            height_mm=height_mm,
+                        )
+                        st.session_state["mvp_run"] = run_offline_document(
+                            input_path,
+                            allowed,
+                            input_path.parents[1] / "run",
+                            user_prompt=prompt,
+                            layout=DEFAULT_LAYOUT,
+                            input_mode=input_mode,
+                            orientation=orientation,
+                            normalization_result=normalization,
+                            normalization_confirmed=True,
+                            input_kind=input_kind,
+                            page_index=int(page_number) - 1,
+                            registration=registration,
+                        )
+                        st.session_state["generation_completed_for_preview"] = True
+                        st.rerun()
+            except Exception as error:
+                st.error(str(error))
 
     normalization = st.session_state.get("input_normalization")
     if not isinstance(normalization, InputNormalizationResult):
