@@ -19,6 +19,12 @@ from printgpt_mvp.pipeline import (
     rectangular_allowed_region,
     run_offline_document,
 )
+from printgpt_mvp.input_normalization import (
+    InputMode,
+    InputNormalizationResult,
+    OrientationChoice,
+    normalize_document_input,
+)
 
 
 def _candidate_label(run: MvpRun, attempt_id: str) -> str:
@@ -27,6 +33,20 @@ def _candidate_label(run: MvpRun, attempt_id: str) -> str:
 
 
 def _clear_results() -> None:
+    import streamlit as st
+
+    for key in (
+        "input_normalization",
+        "upload_path",
+        "mvp_run",
+        "approved_export",
+        "approve_preview",
+        "normalization_confirmed",
+    ):
+        st.session_state.pop(key, None)
+
+
+def _clear_generation() -> None:
     import streamlit as st
 
     for key in ("mvp_run", "approved_export", "approve_preview"):
@@ -39,13 +59,24 @@ def main() -> None:
     st.set_page_config(page_title="PrintGPT MVP", layout="wide")
     st.title("PrintGPT — safe A4 completion preview")
     st.caption(
-        "Upload a scanned document or a photo of a page. Markers are optional. Output uses A4. "
-        "This is the offline demonstration with two generated sample additions. "
+        "Choose either a full-page A4 scanner export or a marked calibration page. Output uses A4. "
+        "This offline demonstration uses deterministic generator and critic doubles — not live Gemini. "
         "Nothing is exported until you explicitly approve a validated preview."
     )
 
+    mode_labels = {
+        InputMode.SCANNER_A4.value: "Scanner A4",
+        InputMode.MARKED_PAGE.value: "Marked page (ArUco)",
+    }
+    input_mode_value = st.selectbox(
+        "Input mode",
+        list(mode_labels),
+        format_func=mode_labels.get,
+        help="Scanner A4 explicitly bypasses markers. Marked page always requires the expected ArUco quartet.",
+    )
+    input_mode = InputMode(input_mode_value)
     upload = st.file_uploader(
-        "Upload a scan or PDF (markers optional)",
+        "Upload an image or PDF",
         type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"],
     )
     kind_labels = {"auto": "Automatic", "scan": "Scanned page", "photo": "Photo of a page"}
@@ -98,8 +129,74 @@ def main() -> None:
         _clear_results()
         st.session_state["request_key"] = request_key
 
-    if st.button("Generate two candidates", type="primary", disabled=upload is None):
+    if st.button("Prepare normalized preview", type="primary", disabled=upload is None):
         _clear_results()
+        try:
+            assert upload is not None
+            upload_digest = sha256(upload.getvalue()).hexdigest()
+            run_root = Path("artifacts/streamlit") / upload_digest[:12]
+            suffix = Path(upload.name).suffix.lower() if upload is not None else ".png"
+            input_path = run_root / "input" / f"upload{suffix}"
+            input_path.parent.mkdir(parents=True, exist_ok=True)
+            input_path.write_bytes(upload.getvalue())
+            with st.spinner("Loading and normalizing the selected input mode…"):
+                st.session_state["input_normalization"] = normalize_document_input(
+                    input_path,
+                    input_mode=input_mode,
+                    orientation=orientation,
+                    layout=DEFAULT_LAYOUT,
+                )
+                st.session_state["upload_path"] = input_path
+        except Exception as error:
+            st.error(str(error))
+
+    normalization = st.session_state.get("input_normalization")
+    if not isinstance(normalization, InputNormalizationResult):
+        return
+
+    st.subheader("Corrected canonical A4 preview")
+    if normalization.input_mode is InputMode.SCANNER_A4:
+        st.info(
+            "Scanner-aligned A4. Orientation and dimensions normalized; physical printer registration still requires calibration."
+        )
+    else:
+        st.success(
+            "ArUco calibration accepted — "
+            f"markers {list(normalization.marker_ids)}, confidence {normalization.confidence:.3f}."
+        )
+    physical = normalization.source_physical_dimensions_mm
+    physical_text = "unknown" if physical is None else f"{physical[0]:.2f} × {physical[1]:.2f} mm"
+    st.write(
+        f"Source page: **{normalization.source_pixel_dimensions[0]} × "
+        f"{normalization.source_pixel_dimensions[1]} px** · physical size: **{physical_text}**"
+    )
+    st.write(
+        f"Detected orientation: **{normalization.detected_orientation}** · applied: "
+        f"**{orientation_labels.get(normalization.selected_rotation.value, normalization.selected_rotation.value)}** · "
+        f"canonical: **{normalization.canonical_dimensions[0]} × {normalization.canonical_dimensions[1]} px**"
+    )
+    st.image(normalization.canonical_rgb, caption="Normalized portrait A4 used by masking and generation")
+    for warning in normalization.warnings:
+        st.warning(warning)
+    confirmed_normalization = st.checkbox(
+        "I confirm the orientation and placement in this normalized A4 preview look correct.",
+        key="normalization_confirmed",
+    )
+
+    prompt = st.text_input("Optional continuation prompt", placeholder="Leave blank for automatic continuation")
+    st.subheader("Allowed completion rectangle (millimetres from the top-left)")
+    columns = st.columns(4)
+    x_mm = columns[0].number_input("X", min_value=0.0, max_value=209.0, value=40.0, step=1.0)
+    y_mm = columns[1].number_input("Y", min_value=0.0, max_value=296.0, value=60.0, step=1.0)
+    width_mm = columns[2].number_input("Width", min_value=1.0, max_value=210.0, value=130.0, step=1.0)
+    height_mm = columns[3].number_input("Height", min_value=1.0, max_value=297.0, value=180.0, step=1.0)
+
+    if st.button(
+        "Generate two candidates",
+        type="primary",
+        disabled=not confirmed_normalization,
+    ):
+        _clear_generation()
         try:
             allowed = rectangular_allowed_region(
                 x_mm=x_mm,
@@ -107,16 +204,12 @@ def main() -> None:
                 width_mm=width_mm,
                 height_mm=height_mm,
             )
-            run_root = Path("artifacts/streamlit") / uuid4().hex[:12]
-            suffix = Path(upload.name).suffix.lower() if upload is not None else ".png"
-            input_path = run_root / "input" / f"upload{suffix}"
-            input_path.parent.mkdir(parents=True, exist_ok=True)
-            input_path.write_bytes(upload.getvalue())
-            with st.spinner("Aligning, protecting existing ink, and generating two candidates…"):
+            input_path = Path(st.session_state["upload_path"])
+            with st.spinner("Protecting existing ink and generating two offline candidates…"):
                 st.session_state["mvp_run"] = run_offline_document(
                     input_path,
                     allowed,
-                    run_root / "run",
+                    input_path.parents[1] / "run",
                     user_prompt=prompt,
                     layout=DEFAULT_LAYOUT,
                     input_kind=input_kind,
@@ -129,13 +222,8 @@ def main() -> None:
                         allow_nonuniform_resize=nonuniform,
                     ),
                 )
-                st.session_state.pop("approved_export", None)
         except Exception as error:
-            message = str(error)
-            if "scan again" in message.lower():
-                st.error(f"Scan again required — {message}")
-            else:
-                st.error(message)
+            st.error(str(error))
 
     run = st.session_state.get("mvp_run")
     if not isinstance(run, MvpRun):
