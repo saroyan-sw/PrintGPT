@@ -331,13 +331,23 @@ def run_offline_document(
     backend: GenerationBackend | str = GenerationBackend.OFFLINE,
     gemini_settings: Any | None = None,
     gemini_client: Any | None = None,
+    scanner_full_sheet_confirmed: bool = False,
+    scanner_profile: dict[str, Any] | None = None,
 ) -> MvpRun:
     """Run alignment, masking, generation, validation, criticism, and selection.
 
     ``backend`` selects the deterministic offline doubles (default) or live
     Gemini. Live prerequisites are checked before anything is written, and no
     backend ever creates printable output: only ``approve_and_export`` does.
+
+    A Scanner A4 page becomes printable onto the original only when the user
+    confirms it shows the complete sheet *and* ``scanner_profile`` is a measured
+    scan-to-paper profile (``printgpt_mvp.scanner_profile``); the page is then
+    resampled into physical paper coordinates. Confirmation alone leaves export
+    locked with status ``awaiting_scanner_measurement``.
     """
+    if scanner_profile is not None and scanner_profile.get("status") != "measured":
+        raise ValueError("scanner_profile must be a measured profile")
     backend = GenerationBackend(backend)
     config = GenerationConfig(layout=layout)
     if backend is GenerationBackend.GEMINI:
@@ -403,19 +413,45 @@ def run_offline_document(
             dtype=np.float64,
         )
         registered = normalization.marker_calibration_used
+        mode, status = ("aruco", "registered") if registered else ("scanner_a4", "preview_only")
+        evidence = "ArUco marker geometry" if registered else "scanner A4 normalization only"
+        scale_and_origin = "established by markers" if registered else "unconfirmed"
+        source_accuracy = None
+        scanner_full_sheet = (
+            not registered and scanner_full_sheet_confirmed and normalization.input_mode is InputMode.SCANNER_A4
+        )
+        if scanner_full_sheet:
+            mode = "scanner_full_sheet"
+            if scanner_profile is None:
+                status = "awaiting_scanner_measurement"
+                evidence = "complete sheet confirmed by the user; scanner placement not measured yet"
+            else:
+                from .scanner_profile import apply_scanner_profile, scan_to_paper_px
+
+                canonical = apply_scanner_profile(canonical, scanner_profile, layout)
+                transform = scan_to_paper_px(scanner_profile, layout) @ transform
+                observed = cv2.perspectiveTransform(source_corners[None], transform)[0]
+                registered, status = True, "registered"
+                source_accuracy = float(scanner_profile["accuracy_bound_mm"])
+                evidence = (
+                    "complete sheet confirmed by the user; measured scanner profile from "
+                    f"{scanner_profile.get('measured_at')} (holdout bound {source_accuracy:.2f} mm)"
+                )
+                scale_and_origin = "established by measured scanner profile"
         alignment.update(
-            alignment_method="aruco" if registered else "scanner_a4",
-            input_kind="auto" if registered else "scan",
+            alignment_method="aruco" if mode == "aruco" else "scanner_a4",
+            input_kind="auto" if mode == "aruco" else "scan",
             source_to_canonical=transform.tolist(),
             canonical_to_source=np.linalg.inv(transform).tolist(),
             observed_polygon_canonical_px=observed.tolist(),
             registration={
-                "status": "registered" if registered else "preview_only",
+                "status": status,
                 "export_allowed": registered,
-                "evidence": "ArUco marker geometry" if registered else "scanner A4 normalization only",
-                "options": {"mode": "aruco" if registered else "scanner_a4"},
+                "evidence": evidence,
+                "options": {"mode": mode},
                 "page_size_mm": [layout.page_width_mm, layout.page_height_mm],
-                "scale_and_origin": "established by markers" if registered else "unconfirmed",
+                "scale_and_origin": scale_and_origin,
+                "measured_source_accuracy_mm": source_accuracy,
                 "printer_accuracy": "unmeasured",
             },
             coordinate_system={

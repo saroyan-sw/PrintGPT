@@ -13,6 +13,8 @@ from printgpt_alignment.document import load_document
 from printgpt_alignment.registration import RegistrationOptions
 
 from printgpt_mvp.hardware_panel import render_hardware_panel
+from printgpt_mvp.print_step import render_print_step
+from printgpt_mvp.scanner_profile import measured_scanner_profile
 from printgpt_mvp.pipeline import (
     PRINT_AT_ACTUAL_SIZE,
     GenerationBackend,
@@ -80,6 +82,12 @@ def _clear_generation() -> None:
         "approved_export",
         "approve_preview",
         "generation_completed_for_preview",
+        "ps_readiness",
+        "ps_prepared",
+        "ps_submitted",
+        "ps_error",
+        "ps_confirm_loaded",
+        "ps_confirm_spare",
     ):
         st.session_state.pop(key, None)
 
@@ -419,6 +427,7 @@ def main() -> None:
         crop_y,
         profile_path,
         backend.value,
+        bool(st.session_state.get("scanner_full_sheet")),
     )
     if st.session_state.get("generation_key") != generation_key:
         _clear_generation()
@@ -529,6 +538,25 @@ def main() -> None:
             "I confirm the orientation and placement in this normalized A4 preview look correct.",
             key="normalization_confirmed",
         )
+        full_sheet = False
+        scanner_profile = None
+        if normalization.input_mode is InputMode.SCANNER_A4:
+            full_sheet = st.checkbox(
+                "This scan shows the complete A4 sheet (scanned on the glass at A4, nothing cut off).",
+                key="scanner_full_sheet",
+                help="Needed to print onto the original. It also needs the scanner placement measured once.",
+            )
+            scanner_profile = measured_scanner_profile()
+            if full_sheet and scanner_profile is None:
+                st.info(
+                    "Printing onto the original stays locked until the scanner placement is measured once "
+                    "(python -m printgpt_mvp.scanner_profile; see docs/mvp.md). You can still generate and preview."
+                )
+            elif full_sheet:
+                st.caption(
+                    f"Using the scanner profile measured {scanner_profile.get('measured_at')} "
+                    f"(accuracy bound {scanner_profile['accuracy_bound_mm']:.2f} mm)."
+                )
         if st.button(
             "Generate two candidates",
             type="primary",
@@ -561,7 +589,9 @@ def main() -> None:
                         normalization_confirmed=confirmed_normalization,
                         input_kind=input_kind,
                         page_index=int(page_number)-1,
-                        registration=RegistrationOptions(
+                        # A confirmed complete Scanner A4 sheet is registered from its
+                        # normalized preview and the measured scanner profile instead.
+                        registration=None if full_sheet else RegistrationOptions(
                             mode=mode, confirmed=confirmed_geometry,
                             page_size_mm=(paper_width, paper_height),
                             corners_px=json.loads(corners_text) if corners_text.strip() else None,
@@ -569,6 +599,8 @@ def main() -> None:
                             allow_nonuniform_resize=nonuniform,
                         ),
                         backend=backend,
+                        scanner_full_sheet_confirmed=full_sheet,
+                        scanner_profile=scanner_profile if full_sheet else None,
                     )
                     st.session_state["generation_completed_for_preview"] = True
                     st.rerun()
@@ -579,7 +611,7 @@ def main() -> None:
 
     run = st.session_state.get("mvp_run")
     if not isinstance(run, MvpRun):
-        render_hardware_panel(st, None)
+        render_hardware_panel(st)
         return
     if run.alignment.get("alignment_method") == "scan_frame":
         st.info("The full scan was fitted for preview. Its image bounds have not been established as physical paper edges.")
@@ -597,6 +629,11 @@ def main() -> None:
     registered = run.alignment.get("registration", {}).get("export_allowed", False)
     if registered:
         st.info("Source geometry registered under the recorded assumptions. Printer accuracy is unmeasured until calibrated; use sacrificial sheets first.")
+    elif run.alignment.get("registration", {}).get("status") == "awaiting_scanner_measurement":
+        st.warning(
+            "Preview is usable. Printing onto the original is locked until the scanner placement is measured "
+            "once (python -m printgpt_mvp.scanner_profile; see docs/mvp.md)."
+        )
     else:
         st.warning("Preview is usable, but export onto the original sheet is blocked until physical geometry is confirmed.")
     with st.expander("Source pixels and physical coordinate evidence"):
@@ -694,7 +731,8 @@ def main() -> None:
             file_name=exported.toner_png_path.name,
             mime="image/png",
         )
-    render_hardware_panel(st, exported)
+    render_print_step(st, exported)
+    render_hardware_panel(st)
 
 
 if __name__ == "__main__":

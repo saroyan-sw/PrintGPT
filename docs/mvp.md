@@ -39,6 +39,36 @@ stretched or cropped. Non-A4 input is rejected and is not assigned calibrated
 physical coordinates. ArUco detection is bypassed only because the user chose
 Scanner A4.
 
+#### Printing onto an emailed or uploaded Scanner A4 scan
+
+A Scanner A4 page is preview-only by default: normalization proves the page is
+A4 and upright, not where the sheet sat on the scanner glass. Two things unlock
+printing onto the original:
+
+1. In the app, tick **"This scan shows the complete A4 sheet"** (scanned on the
+   glass at A4, nothing cut off). Without a measured scanner profile the run is
+   recorded as `awaiting_scanner_measurement`: generation and preview work, and
+   export stays blocked.
+2. Measure the scanner placement once (`printgpt_mvp.scanner_profile`):
+
+   ```powershell
+   # Scan a sheet with clear marks (the printed calibration page works) with Scan and Send.
+   .\.venv\Scripts\python.exe -m printgpt_mvp.scanner_profile locate <scan.pdf>
+   # Measure the same marker corners on the paper with a ruler (mm from the top-left corner),
+   # write a printgpt-scanner-measurement/1 record (>= 6 spread fit points, >= 3 holdout points,
+   # measurement_uncertainty_mm), then:
+   .\.venv\Scripts\python.exe -m printgpt_mvp.scanner_profile fit <record.json>
+   ```
+
+   The fit uses only the fit points, and the holdout points judge it. The profile
+   is saved as `measured` (default `%LOCALAPPDATA%\PrintGPT\scanner_profile.json`,
+   override `PRINTGPT_SCANNER_PROFILE`) only when holdout error plus measurement
+   uncertainty is below 0.5 mm.
+
+With both, the scan is resampled into physical paper coordinates, the run is
+`registered`, and `measured_source_accuracy_mm` records the bound. Printer
+accuracy is a separate measurement (`printgpt_alignment.printer_calibration`).
+
 ### Marked page
 
 This mode requires the expected ArUco marker quartet and retains the existing
@@ -113,6 +143,31 @@ The PNG and PDF are built from `sanitized_new_ink_mask` only:
 
 Print `approved_a4_actual_size.pdf` at **100% or Actual Size**. Disable Fit,
 Shrink, Scale to Fit, borderless expansion, and automatic rotation.
+
+## Printing onto the original (main flow)
+
+After approval, the app shows **Print onto your original** (`print_step`).
+The printer cannot tell which sheet is in the tray or which way up it lies, so
+loading the original is guided and confirmed by the user:
+
+1. **Load your original sheet.** Instructions come from a paper-loading profile
+   (`print_readiness.PaperLoadingProfile`: tray, drawing side up or down, edge
+   fed first), saved in `%LOCALAPPDATA%\PrintGPT\paper_loading.json` (override
+   `PRINTGPT_PAPER_PROFILE`) and editable in the app. A new or changed profile
+   is **unverified**: the app asks for a spare test sheet. After a print, the user
+   can mark the direction verified once the new ink landed on the drawn side,
+   upright.
+2. **Check the printer.** Each check is shown pass or fail: queue found and
+   allowlisted, reachable on the network, ready, paper path clear (no jam, empty
+   tray, open door or intervention), no other jobs waiting, and physical printing
+   enabled (`PRINTGPT_HW_ALLOW_PRINT=1`). Only then is the artifact validated and
+   a print job prepared, with the same checks as the hardware MCP server.
+3. **Confirm and print.** The print button unlocks only after an explicit
+   confirmation of how the sheet is loaded (plus the spare-sheet confirmation
+   while unverified). It prints one page, one copy.
+4. **Check the result**, and optionally rescan to compare placement.
+
+The optional hardware expander now only reports printer and scanner status.
 
 ## Commands
 
