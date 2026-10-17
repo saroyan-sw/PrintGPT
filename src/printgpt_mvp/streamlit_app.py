@@ -731,10 +731,19 @@ def main() -> None:
             st.session_state.pop("approved_export", None)
             st.session_state["export_candidate"] = choice
         confirmed = st.checkbox("I approve this sanitized new-ink preview for A4 export.", key="approve_preview")
-        if st.button("Approve and create toner-only files", disabled=not (confirmed and registered)):
+        spare_test = False
+        if not registered:
+            spare_test = st.checkbox(
+                "Test print on a SPARE sheet only: placement on the paper is not measured, so the new ink may land "
+                "a few millimetres off. I will not use my original.",
+                key="spare_sheet_test",
+            )
+        if st.button("Approve and create toner-only files", disabled=not (confirmed and (registered or spare_test))):
             try:
                 profile = json.loads(Path(profile_path).read_text(encoding="utf-8")) if profile_path.strip() else None
-                st.session_state["approved_export"] = approve_and_export(run, choice, approved=True, printer_profile=profile)
+                st.session_state["approved_export"] = approve_and_export(
+                    run, choice, approved=True, printer_profile=profile, spare_sheet_test=spare_test and not registered
+                )
             except Exception as error:
                 st.error(str(error))
 

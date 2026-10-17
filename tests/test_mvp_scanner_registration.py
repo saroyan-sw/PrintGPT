@@ -80,3 +80,15 @@ def test_confirmed_scan_with_measured_profile_exports_in_paper_coordinates(scan,
 def test_unmeasured_profile_is_refused(scan, tmp_path) -> None:
     with pytest.raises(ValueError, match="measured"):
         _run(scan, tmp_path / "run", scanner_full_sheet_confirmed=True, scanner_profile={"status": "rejected"})
+
+
+def test_spare_sheet_test_export_is_allowed_and_marked(scan, tmp_path) -> None:
+    import json
+
+    run = _run(scan, tmp_path / "run", scanner_full_sheet_confirmed=True)
+    exported = approve_and_export(run, run.suggested_candidate.attempt_id, approved=True, spare_sheet_test=True)
+    assert exported.spare_sheet_test and exported.toner_png_path.is_file()
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["registration"]["status"] == "unregistered_spare_sheet_test"
+    approval = json.loads((tmp_path / "run" / "print" / "print_approval.json").read_text(encoding="utf-8"))
+    assert approval["input_mode"]["registration_status"] == "unregistered_spare_sheet_test"

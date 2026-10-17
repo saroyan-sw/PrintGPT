@@ -106,6 +106,8 @@ class ApprovedExport:
     a4_pdf_path: Path
     manifest_path: Path
     print_instruction: str = PRINT_AT_ACTUAL_SIZE
+    # Unregistered placement: only ever for a spare test sheet, never the original.
+    spare_sheet_test: bool = False
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -585,8 +587,14 @@ def _write_toner_outputs(
 
 
 def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
-                       printer_profile: dict[str, Any] | None = None) -> ApprovedExport:
-    """Export only an explicitly approved, ranked, non-simulated sanitized mask."""
+                       printer_profile: dict[str, Any] | None = None,
+                       spare_sheet_test: bool = False) -> ApprovedExport:
+    """Export only an explicitly approved, ranked, non-simulated sanitized mask.
+
+    ``spare_sheet_test`` allows a page whose physical placement is not registered
+    to be exported for a test print on a spare sheet. The export and its approval
+    record are marked as such; every other check still applies.
+    """
     if not approved:
         raise PermissionError("explicit user approval is required before export")
     if run.generation.simulated_validation:
@@ -599,8 +607,12 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
         raise ValueError("candidate validation is missing, rejected, or simulated")
     if attempt.sanitized_new_ink_mask is None:
         raise ValueError("candidate has no sanitized new-ink mask")
-    if not run.alignment.get("registration", {}).get("export_allowed", False):
+    registered = bool(run.alignment.get("registration", {}).get("export_allowed", False))
+    if not registered and not spare_sheet_test:
         raise ValueError("preview only: confirm physical scale and paper origin before exporting onto the original sheet")
+    spare_sheet_test = spare_sheet_test and not registered
+    if spare_sheet_test and printer_profile is not None:
+        raise ValueError("a printer correction needs registered source geometry; spare-sheet tests use none")
     layout = run.generation.config.layout
     correction = None
     if printer_profile is not None:
@@ -637,13 +649,19 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
         "toner_png": png_path.relative_to(run.output_dir).as_posix(),
         "a4_pdf": pdf_path.relative_to(run.output_dir).as_posix(),
     }
+    alignment = run.alignment
+    if spare_sheet_test:
+        alignment = {**alignment, "registration": {
+            **(alignment.get("registration") or {}),
+            "status": "unregistered_spare_sheet_test", "export_allowed": False, "spare_sheet_test": True,
+        }}
     _write_json(
         run.manifest_path,
         _manifest_payload(run.generation, selected, run.normalization,
                           approved=True, exported_paths=exported,
-                          alignment=run.alignment, printer=printer_profile),
+                          alignment=alignment, printer=printer_profile),
     )
-    registration = run.alignment.get("registration") or {}
+    registration = alignment.get("registration") or {}
     write_print_approval(
         run_dir=run.output_dir,
         run_id=run.generation.run_id,
@@ -664,4 +682,5 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
         },
         printer_correction_applied=correction is not None,
     )
-    return ApprovedExport(selected.candidate_id, selected.attempt_id, png_path, pdf_path, run.manifest_path)
+    return ApprovedExport(selected.candidate_id, selected.attempt_id, png_path, pdf_path, run.manifest_path,
+                          spare_sheet_test=spare_sheet_test)
