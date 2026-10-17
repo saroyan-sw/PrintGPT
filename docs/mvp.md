@@ -144,6 +144,23 @@ The PNG and PDF are built from `sanitized_new_ink_mask` only:
 Print `approved_a4_actual_size.pdf` at **100% or Actual Size**. Disable Fit,
 Shrink, Scale to Fit, borderless expansion, and automatic rotation.
 
+## Choosing the allowed area
+
+The allowed rectangle is drawn on the normalized A4 preview (magenta) before
+generation. `region_helper` suggests an area (blue): the empty strip on the side
+where the drawing looks cut off (most strokes end at that edge), from the
+drawing's edge to a 6 mm printable margin. "Use suggested area" fills in the
+numbers. Before generation the rectangle is checked, and warnings explain when:
+
+- it covers more than 25% of the existing drawing (new ink cannot go on or
+  next to existing lines);
+- the drawing looks cut off on one side but the area covers less than half of
+  the space there (the continuation would be drawn outside and rejected);
+- it is very small, or it reaches into the 6 mm margin the printer cannot print.
+
+With Live Gemini on, generation with warnings needs an explicit "Generate
+anyway" tick, so paid requests are not spent on an area that is probably wrong.
+
 ## Printing onto the original (main flow)
 
 After approval, the app shows **Print onto your original** (`print_step`).
