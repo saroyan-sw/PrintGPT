@@ -12,6 +12,7 @@ from printgpt_alignment import DEFAULT_LAYOUT
 from printgpt_alignment.document import load_document
 from printgpt_alignment.registration import RegistrationOptions
 
+from printgpt_mvp.calibration_panel import current_loop_profile, render_calibration_panel
 from printgpt_mvp.hardware_panel import render_hardware_panel
 from printgpt_mvp.print_step import render_print_step
 from printgpt_mvp.region_helper import RectMM, check_region, draw_region, suggest_region
@@ -275,6 +276,7 @@ def main() -> None:
     import streamlit as st
 
     st.set_page_config(page_title="PrintGPT MVP", layout="wide")
+    render_calibration_panel(st)
     st.title("PrintGPT — safe A4 completion preview")
     st.caption(
         "Choose either a full-page A4 scanner export or a marked calibration page. Output uses A4. "
@@ -574,6 +576,7 @@ def main() -> None:
         )
         full_sheet = False
         scanner_profile = None
+        loop_profile = None
         if normalization.input_mode is InputMode.SCANNER_A4:
             full_sheet = st.checkbox(
                 "This scan shows the complete A4 sheet (scanned on the glass at A4, nothing cut off).",
@@ -581,10 +584,17 @@ def main() -> None:
                 help="Needed to print onto the original. It also needs the scanner placement measured once.",
             )
             scanner_profile = measured_scanner_profile()
-            if full_sheet and scanner_profile is None:
+            if scanner_profile is None:
+                loop_profile = current_loop_profile()
+            if full_sheet and scanner_profile is None and loop_profile is not None:
+                st.caption(
+                    f"Using the printer calibration from {loop_profile['measured_at'][:16].replace('T', ' ')} "
+                    f"(verified error {loop_profile['accuracy_bound_mm']:.2f} mm); prints will be corrected."
+                )
+            elif full_sheet and scanner_profile is None:
                 st.info(
-                    "Printing onto the original stays locked until the scanner placement is measured once "
-                    "(python -m printgpt_mvp.scanner_profile; see docs/mvp.md). You can still generate and preview."
+                    "Printing onto the original stays locked until the printer is calibrated (sidebar: Printer "
+                    "calibration) or the scanner placement is measured. You can still generate and preview."
                 )
             elif full_sheet:
                 st.caption(
@@ -642,6 +652,7 @@ def main() -> None:
                         backend=backend,
                         scanner_full_sheet_confirmed=full_sheet,
                         scanner_profile=scanner_profile if full_sheet else None,
+                        loop_profile=loop_profile if full_sheet else None,
                     )
                     st.session_state["generation_completed_for_preview"] = True
                     st.rerun()
@@ -672,8 +683,8 @@ def main() -> None:
         st.info("Source geometry registered under the recorded assumptions. Printer accuracy is unmeasured until calibrated; use sacrificial sheets first.")
     elif run.alignment.get("registration", {}).get("status") == "awaiting_scanner_measurement":
         st.warning(
-            "Preview is usable. Printing onto the original is locked until the scanner placement is measured "
-            "once (python -m printgpt_mvp.scanner_profile; see docs/mvp.md)."
+            "Preview is usable. Printing onto the original is locked until the printer is calibrated (sidebar: "
+            "Printer calibration) or the scanner placement is measured."
         )
     else:
         st.warning("Preview is usable, but export onto the original sheet is blocked until physical geometry is confirmed.")

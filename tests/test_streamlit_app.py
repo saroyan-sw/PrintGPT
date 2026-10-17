@@ -11,6 +11,14 @@ pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest
 
 
+@pytest.fixture(autouse=True)
+def _isolated_profiles(tmp_path, monkeypatch):
+    """Never pick up calibration or loading profiles saved on the developer's machine."""
+    monkeypatch.setenv("PRINTGPT_CALIBRATION_DIR", str(tmp_path / "calibration"))
+    monkeypatch.setenv("PRINTGPT_PAPER_PROFILE", str(tmp_path / "paper_loading.json"))
+    monkeypatch.setenv("PRINTGPT_SCANNER_PROFILE", str(tmp_path / "scanner_profile.json"))
+
+
 def _button(app, label):
     return next(button for button in app.button if button.label == label)
 
@@ -119,12 +127,12 @@ def test_complete_scanner_sheet_without_measurement_stays_locked(tmp_path, monke
         full_sheet = app.checkbox[1]
         assert "complete A4 sheet" in full_sheet.label
         full_sheet.check().run()
-        assert any("locked until the scanner placement is measured" in i.value for i in app.info)
+        assert any("locked until the printer is calibrated" in i.value for i in app.info)
         _button(app, "Generate two candidates").click().run()
         assert not app.exception and not app.error
         run = app.session_state["mvp_run"]
         assert run.alignment["registration"]["status"] == "awaiting_scanner_measurement"
-        assert any("locked until the scanner placement is measured" in w.value for w in app.warning)
+        assert any("locked until the printer is calibrated" in w.value for w in app.warning)
 
 
 def test_area_is_shown_suggested_and_checked_before_generation(tmp_path, monkeypatch):
@@ -163,3 +171,15 @@ def test_live_gemini_needs_an_override_when_the_area_looks_wrong(tmp_path, monke
         override.check().run()
         assert not _button(app, "Generate two candidates").disabled
         assert "mvp_run" not in app.session_state
+
+
+def test_sidebar_shows_printer_calibration_status(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app_path = Path(__file__).resolve().parents[1] / "src/printgpt_mvp/streamlit_app.py"
+    with patch("streamlit.file_uploader", return_value=None):
+        app = AppTest.from_file(str(app_path), default_timeout=60).run()
+        assert any("Not calibrated yet" in i.value for i in app.sidebar.info)
+        next(b for b in app.sidebar.button if b.label == "Start a new calibration").click().run()
+        assert not app.exception
+        assert any("Round 1" in m.value for m in app.sidebar.markdown)
+        assert (tmp_path / "artifacts" / "calibration").is_dir()

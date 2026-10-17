@@ -92,3 +92,24 @@ def test_spare_sheet_test_export_is_allowed_and_marked(scan, tmp_path) -> None:
     assert manifest["registration"]["status"] == "unregistered_spare_sheet_test"
     approval = json.loads((tmp_path / "run" / "print" / "print_approval.json").read_text(encoding="utf-8"))
     assert approval["input_mode"]["registration_status"] == "unregistered_spare_sheet_test"
+
+
+def test_loop_calibration_registers_and_corrects_the_export(scan, tmp_path) -> None:
+    import json
+
+    loop_correction = [[1.0, 0.0, -0.5], [0.0, 1.0, 1.2], [0.0, 0.0, 1.0]]
+    profile = {"status": "measured", "printer_queue": "Canon", "tray": "bypass", "measured_at": "2026-10-17T18:00:00",
+               "accuracy_bound_mm": 0.3, "rounds": 3, "correction_mm": loop_correction}
+    run = _run(scan, tmp_path / "run", scanner_full_sheet_confirmed=True, loop_profile=profile)
+    registration = run.alignment["registration"]
+    assert registration["status"] == "registered" and registration["export_allowed"]
+    assert "loop calibration" in registration["evidence"]
+    exported = _export(run)
+    toner = cv2.imread(str(exported.toner_png_path), cv2.IMREAD_GRAYSCALE) < 128
+    mask = run.generation.attempt(run.suggested_candidate.attempt_id).sanitized_new_ink_mask > 0
+    px_per_mm = 300 / 25.4
+    shift_x = (np.nonzero(toner)[1].mean() - np.nonzero(mask)[1].mean()) / px_per_mm
+    shift_y = (np.nonzero(toner)[0].mean() - np.nonzero(mask)[0].mean()) / px_per_mm
+    assert shift_x == pytest.approx(-0.5, abs=0.1) and shift_y == pytest.approx(1.2, abs=0.1)
+    approval = json.loads((tmp_path / "run" / "print" / "print_approval.json").read_text(encoding="utf-8"))
+    assert approval["printer_correction_applied"] is True
