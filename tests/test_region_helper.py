@@ -86,3 +86,11 @@ def test_preview_marks_area_and_suggestion() -> None:
     assert tuple(preview[y, x]) == (255, 255, 255)  # outside the area stays untinted
     x, y = _p(60, 35)
     assert preview[y, x, 1] > preview[y, x, 0]  # inside the area is tinted green
+
+
+def test_dust_specks_do_not_move_the_suggestion() -> None:
+    page = _cut_on_right()
+    for x, y in ((180, 60), (195, 150), (170, 250)):
+        cv2.circle(page, _p(x, y), 1, (0, 0, 0), -1)  # tiny dark specks far from the drawing
+    assert drawing_bounds(page, LAYOUT).right == pytest.approx(120, abs=1.5)
+    assert suggest_region(page, LAYOUT).side == "right"

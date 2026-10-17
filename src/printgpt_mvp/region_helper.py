@@ -28,6 +28,8 @@ MIN_STRIP_MM: Final[float] = 15.0
 _EDGE_BAND_MM: Final[float] = 2.0
 _INK_THRESHOLD: Final[int] = 128
 _MAX_EXISTING_INK_SHARE: Final[float] = 0.25
+# Marks smaller than this are dust or scanner noise, not part of the drawing.
+_MIN_MARK_MM2: Final[float] = 1.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,13 +69,17 @@ def _px_per_mm(layout: A4CalibrationLayout) -> tuple[float, float]:
 
 
 def ink_mask(page_rgb: np.ndarray, layout: A4CalibrationLayout = DEFAULT_LAYOUT) -> np.ndarray:
-    """Dark pixels of the drawing, ignoring a thin border where scanner edge lines appear."""
+    """Dark pixels of the drawing, ignoring scanner edge lines and dust specks."""
     ink = cv2.cvtColor(page_rgb, cv2.COLOR_RGB2GRAY) < _INK_THRESHOLD
     sx, sy = _px_per_mm(layout)
     border_x, border_y = int(round(3 * sx)), int(round(3 * sy))
     ink[:border_y] = ink[-border_y:] = False
     ink[:, :border_x] = ink[:, -border_x:] = False
-    return ink
+    # Specks far from the drawing would otherwise stretch its bounds across the page.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), connectivity=8)
+    keep = np.zeros(count, dtype=bool)
+    keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= _MIN_MARK_MM2 * sx * sy
+    return keep[labels]
 
 
 def drawing_bounds(page_rgb: np.ndarray, layout: A4CalibrationLayout = DEFAULT_LAYOUT) -> RectMM | None:
