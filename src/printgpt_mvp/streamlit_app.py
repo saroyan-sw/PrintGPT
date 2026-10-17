@@ -1,4 +1,4 @@
-"""Minimal approval UI for the deterministic offline PrintGPT MVP."""
+"""Minimal approval UI for the PrintGPT MVP (offline doubles by default, live Gemini on request)."""
 
 from __future__ import annotations
 
@@ -15,9 +15,12 @@ from printgpt_alignment.registration import RegistrationOptions
 from printgpt_mvp.hardware_panel import render_hardware_panel
 from printgpt_mvp.pipeline import (
     PRINT_AT_ACTUAL_SIZE,
+    GenerationBackend,
+    LiveGenerationUnavailable,
     MvpRun,
     approve_and_export,
     canonicalize_document,
+    gemini_api_key,
     rectangular_allowed_region,
     run_offline_document,
 )
@@ -254,8 +257,8 @@ def main() -> None:
     st.title("PrintGPT — safe A4 completion preview")
     st.caption(
         "Choose either a full-page A4 scanner export or a marked calibration page. Output uses A4. "
-        "This offline demonstration uses deterministic generator and critic doubles — not live Gemini. "
-        "Nothing is exported until you explicitly approve a validated preview."
+        "By default the generator and critic are deterministic offline doubles; switch on Live Gemini "
+        "below to use the real models. Nothing is exported until you explicitly approve a validated preview."
     )
 
     mode_labels = {
@@ -370,6 +373,21 @@ def main() -> None:
             st.session_state["request_key"] = request_key
 
     prompt = st.text_input("Optional continuation prompt", placeholder="Leave blank for automatic continuation")
+    live_gemini = st.toggle(
+        "Live Gemini (paid API requests)",
+        value=False,
+        help="Uses the real Gemini image model and critic: up to 4 image and 4 critic requests per run. "
+        "Validation, approval and export are unchanged.",
+    )
+    backend = GenerationBackend.GEMINI if live_gemini else GenerationBackend.OFFLINE
+    live_ready = not live_gemini or gemini_api_key() is not None
+    if live_gemini and not live_ready:
+        st.warning(
+            "Live Gemini needs an API key. Set GEMINI_API_KEY in the environment or in the local .env "
+            "file (see .env.example), then restart the app. Generation is disabled until then."
+        )
+    elif live_gemini:
+        st.caption("Live Gemini is on. Each run makes paid requests; the offline doubles stay available.")
     st.subheader("Allowed completion rectangle (millimetres from the top-left)")
     columns = st.columns(4)
     x_mm = columns[0].number_input("X", min_value=0.0, max_value=209.0, value=40.0, step=1.0)
@@ -400,6 +418,7 @@ def main() -> None:
         crop_x,
         crop_y,
         profile_path,
+        backend.value,
     )
     if st.session_state.get("generation_key") != generation_key:
         _clear_generation()
@@ -407,7 +426,11 @@ def main() -> None:
 
     if source == _UPLOAD_SOURCE:
         prepare_label = "Generate two candidates" if explicit_registration else "Prepare normalized preview"
-        if st.button(prepare_label, type="primary", disabled=upload is None):
+        if st.button(
+            prepare_label,
+            type="primary",
+            disabled=upload is None or (explicit_registration and not live_ready),
+        ):
             _clear_results()
             try:
                 assert upload is not None
@@ -464,9 +487,12 @@ def main() -> None:
                             input_kind=input_kind,
                             page_index=int(page_number) - 1,
                             registration=registration,
+                            backend=backend,
                         )
                         st.session_state["generation_completed_for_preview"] = True
                         st.rerun()
+            except LiveGenerationUnavailable as error:
+                st.warning(str(error))
             except Exception as error:
                 st.error(str(error))
 
@@ -508,6 +534,7 @@ def main() -> None:
             type="primary",
             disabled=(
                 not confirmed_normalization
+                or not live_ready
                 or bool(st.session_state.get("generation_completed_for_preview"))
             ),
         ):
@@ -520,7 +547,8 @@ def main() -> None:
                     height_mm=height_mm,
                 )
                 input_path = Path(st.session_state["upload_path"])
-                with st.spinner("Protecting existing ink and generating two offline candidates…"):
+                source_label = "live Gemini" if live_gemini else "offline"
+                with st.spinner(f"Protecting existing ink and generating two {source_label} candidates…"):
                     st.session_state["mvp_run"] = run_offline_document(
                         input_path,
                         allowed,
@@ -540,9 +568,12 @@ def main() -> None:
                             dpi_xy=(dpi_x, dpi_y), origin_mm=(crop_x, crop_y),
                             allow_nonuniform_resize=nonuniform,
                         ),
+                        backend=backend,
                     )
                     st.session_state["generation_completed_for_preview"] = True
                     st.rerun()
+            except LiveGenerationUnavailable as error:
+                st.warning(str(error))
             except Exception as error:
                 st.error(str(error))
 
@@ -559,6 +590,10 @@ def main() -> None:
         )
     for warning in run.alignment.get("warnings", ()):
         st.warning(warning)
+    st.caption(
+        f"Generator: `{run.generation.generator_model_id}` · critic: `{run.generation.critic_model_id}` · "
+        f"requests: {run.generation.counters.generation_requests} image, {run.generation.counters.critic_requests} critic"
+    )
     registered = run.alignment.get("registration", {}).get("export_allowed", False)
     if registered:
         st.info("Source geometry registered under the recorded assumptions. Printer accuracy is unmeasured until calibrated; use sacrificial sheets first.")
@@ -595,6 +630,14 @@ def main() -> None:
             if candidate.attempt.preview_rgb is not None:
                 right.image(candidate.attempt.preview_rgb, caption="Sanitized additions in paper coordinates — printer mechanics not simulated")
             metrics = candidate.attempt.validation.metrics if candidate.attempt.validation else {}
+            normalization = candidate.attempt.normalization
+            alignment = None if normalization is None else normalization.alignment
+            if alignment is not None and alignment.applied:
+                st.caption(
+                    f"Model output was realigned onto the original: shifted "
+                    f"{alignment.centre_shift_mm[0]:+.2f} / {alignment.centre_shift_mm[1]:+.2f} mm, "
+                    f"scale {alignment.scale:.3f}, rotation {alignment.rotation_deg:+.2f}°."
+                )
             st.caption(
                 f"Validation accepted · final ink pixels: {metrics.get('final_ink_count', '—')} · "
                 f"removed fraction: {float(metrics.get('removed_fraction', 0.0)):.3f}"

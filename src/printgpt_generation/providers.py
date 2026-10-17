@@ -65,7 +65,11 @@ class GenerationCall:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class CritiqueCall:
-    """Critic inputs. The preview is the sanitized composite, never raw model output."""
+    """Critic inputs. The preview is the sanitized composite, never raw model output.
+
+    ``region_preview`` is a close-up of ``sanitized_preview`` around the
+    printable region, so thin additions remain visible to the critic.
+    """
 
     candidate_id: str
     candidate_index: int
@@ -74,6 +78,7 @@ class CritiqueCall:
     original_page: RGBImage
     guidance_image: RGBImage
     sanitized_preview: RGBImage
+    region_preview: RGBImage | None = None
 
 
 @dataclass(frozen=True, slots=True)

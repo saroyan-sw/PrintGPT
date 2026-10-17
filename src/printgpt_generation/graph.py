@@ -22,14 +22,18 @@ from typing import Final, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from printgpt_alignment.geometry import mm_to_px
+
 from .config import GenerationConfig
 from .critic import parse_critic_output, to_verdict
 from .extraction import normalize_and_extract
+from .framing import expand, mask_bounds
 from .guidance import render_region_guidance
 from .models import (
     AttemptKind,
     AttemptRecord,
     AttemptStatus,
+    BinaryMask,
     CallCounters,
     CriticOutcome,
     GenerationOutcome,
@@ -146,6 +150,8 @@ GENERATE_REVISION: Final = "generate_revision"
 RANK: Final = "rank_candidates"
 
 _REVISION_SEED_OFFSET: Final = 1000
+# Context kept around the printable region in the critic's close-up.
+_CLOSE_UP_MARGIN_MM: Final = 15.0
 
 
 def _active(state: GenerationGraphState) -> AttemptRecord:
@@ -193,6 +199,13 @@ class _Nodes:
         )
         return record, updated
 
+    def _region_close_up(self, preview: RGBImage, printable_region_mask: BinaryMask) -> RGBImage | None:
+        bounds = mask_bounds(printable_region_mask)
+        if bounds is None:
+            return None
+        margin_px = mm_to_px(_CLOSE_UP_MARGIN_MM, self._deps.config.layout.dpi)
+        return readonly_copy(expand(bounds, margin_px, preview.shape).crop(preview))
+
     def prepare_run(self, state: GenerationGraphState) -> StateUpdate:
         request = state["request"]
         return StateUpdate(
@@ -205,7 +218,6 @@ class _Nodes:
     def generate_initial_candidates(self, state: GenerationGraphState) -> StateUpdate:
         request = state["request"]
         assert state["prompt"] is not None and state["guidance_image"] is not None
-        prompt_text = build_generation_prompt(state["prompt"])
         counters = state["counters"]
         records: list[AttemptRecord] = []
         for index in range(self._deps.config.candidate_count):
@@ -214,7 +226,7 @@ class _Nodes:
                 candidate_index=index,
                 attempt_index=0,
                 kind=AttemptKind.INITIAL,
-                prompt=prompt_text,
+                prompt=build_generation_prompt(state["prompt"], index),
                 seed=request.seed + index,
                 source_page=request.canonical_page,
                 guidance_image=state["guidance_image"],
@@ -246,6 +258,7 @@ class _Nodes:
             self._deps.config.extraction,
             additions_mask=output.additions_mask,
             source_page=state["request"].canonical_page,
+            canvas_box=output.canvas_box,
         )
         updated = replace(
             attempt,
@@ -285,6 +298,7 @@ class _Nodes:
             original_page=state["request"].canonical_page,
             guidance_image=state["guidance_image"],
             sanitized_preview=attempt.preview_rgb,
+            region_preview=self._region_close_up(attempt.preview_rgb, state["request"].masks.printable_region_mask),
         )
         critic = self._deps.critic
         result = call_with_retries(
@@ -341,7 +355,9 @@ class _Nodes:
             candidate_index=original.candidate_index,
             attempt_index=original.attempt_index + 1,
             kind=AttemptKind.REVISION,
-            prompt=build_revision_prompt(state["prompt"], decision.reasons, decision.instruction),
+            prompt=build_revision_prompt(
+                state["prompt"], decision.reasons, decision.instruction, original.candidate_index
+            ),
             seed=request.seed + original.candidate_index + _REVISION_SEED_OFFSET,
             source_page=request.canonical_page,
             guidance_image=state["guidance_image"],

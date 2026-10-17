@@ -80,3 +80,23 @@ def test_confirmed_full_page_scan_exposes_registered_export_and_clears_on_change
         app.selectbox[2].select(False).run()
         assert "approved_export" not in app.session_state
         assert "mvp_run" not in app.session_state
+
+
+def test_live_gemini_toggle_without_key_warns_and_blocks_generation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    page = np.full((3508, 2480, 3), 255, dtype=np.uint8)
+    cv2.rectangle(page, (250, 800), (2200, 2800), (0, 0, 0), 10)
+    app_path = Path(__file__).resolve().parents[1] / "src/printgpt_mvp/streamlit_app.py"
+    with patch("streamlit.file_uploader", return_value=_upload(page)):
+        app = AppTest.from_file(str(app_path), default_timeout=45).run()
+        assert app.toggle[0].value is False
+        app.toggle[0].set_value(True).run()
+        assert any("GEMINI_API_KEY" in warning.value for warning in app.warning)
+        app.button[0].click().run()
+        assert not app.exception
+        app.checkbox[0].check().run()
+        assert app.button[1].disabled
+        assert "mvp_run" not in app.session_state
+        app.toggle[0].set_value(False).run()
+        assert not app.button[1].disabled
