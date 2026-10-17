@@ -102,3 +102,11 @@ def test_sessions_survive_reloading(tmp_path) -> None:
     session.add_scan(_print_and_scan(pdf.with_name("approved_toner_only.png"), _loop()), "r1", LAYOUT)
     again = CalibrationSession.load(session.directory)
     assert again.next_round == 2 and np.allclose(again.correction, session.correction)
+
+
+def test_an_upside_down_scan_is_turned_and_measured(tmp_path) -> None:
+    png, _ = write_target(tmp_path, layout=LAYOUT)
+    scan = np.ascontiguousarray(np.rot90(_print_and_scan(png, _loop()), 2))
+    measurement = measure_round(scan, LAYOUT)
+    assert measurement["scan_turned_degrees"] == 180 and not measurement["problems"]
+    assert measurement["offset_mm_at_centre"] == pytest.approx([0.45, -1.2], abs=0.2)

@@ -123,7 +123,23 @@ def _stats(errors: np.ndarray) -> dict[str, float]:
 
 
 def measure_round(scan_rgb: np.ndarray, layout: A4CalibrationLayout = DEFAULT_LAYOUT) -> dict[str, Any]:
-    """Fit the residual map ``t -> o`` from a Scanner A4 scan of a printed target page."""
+    """Fit the residual map ``t -> o`` from a Scanner A4 scan of a printed target page.
+
+    A scan that arrives upside down is turned upright first: the unique marker
+    IDs make its orientation unambiguous, and drawing scans get their
+    orientation confirmed by the user in the preview, so only the small residual
+    belongs to the loop calibration.
+    """
+    measurement = _measure_upright(scan_rgb, layout)
+    if abs(abs(measurement["rotation_degrees"]) - 180.0) < 10.0:
+        measurement = _measure_upright(np.ascontiguousarray(np.rot90(scan_rgb, 2)), layout)
+        measurement["scan_turned_degrees"] = 180
+    else:
+        measurement["scan_turned_degrees"] = 0
+    return measurement
+
+
+def _measure_upright(scan_rgb: np.ndarray, layout: A4CalibrationLayout) -> dict[str, Any]:
     gray = cv2.cvtColor(scan_rgb, cv2.COLOR_RGB2GRAY) if scan_rgb.ndim == 3 else scan_rgb
     detector = cv2.aruco.ArucoDetector(_dictionary(), cv2.aruco.DetectorParameters())
     corners, ids, _ = detector.detectMarkers(gray)

@@ -28,9 +28,58 @@ def current_loop_profile() -> dict[str, Any] | None:
     return load_profile(queue, tray)
 
 
+def _latest_session(queue: str, tray: str) -> Path | None:
+    from printgpt_mvp.loop_calibration import profile_key
+
+    sessions = [path for path in _SESSIONS_ROOT.glob(f"{profile_key(queue, tray)}-*") if (path / "session.json").is_file()]
+    return max(sessions, key=lambda path: path.name) if sessions else None
+
+
 def _latest_email_scan() -> Path | None:
     scans = [path for path in _EMAIL_SCANS.glob("*/input/*") if path.is_file()]
     return max(scans, key=lambda path: path.stat().st_mtime) if scans else None
+
+
+def _email_service(st: Any) -> Any:
+    """Connected Gmail scan service, shared with the main flow's session state."""
+    from printgpt_mvp.email_ingestion import factory as email_factory
+
+    connection = st.session_state.get("email_connection")
+    if connection is None or not connection.connected:
+        connection = email_factory.connect_email_scan_service(email_factory.load_settings(), allow_browser=False)
+        st.session_state["email_connection"] = connection
+    if not connection.connected:
+        raise RuntimeError(f"Gmail is not connected: {connection.message}")
+    return connection.service
+
+
+def _check_gmail(st: Any, session: CalibrationSession) -> None:
+    """Import the newest new scan email and measure it, or report that it has not arrived."""
+    from printgpt_mvp.email_ingestion.models import PollOutcome
+
+    try:
+        service = _email_service(st)
+        scan_id = st.session_state.get("cal_email_session")
+        if scan_id is None or service.get_scan_session_status(scan_id).imported_path:
+            scan_id = service.start_scan_session().session_id
+            st.session_state["cal_email_session"] = scan_id
+        result = service.poll_scan_session(scan_id)
+    except Exception as error:  # Gmail settings, consent, or network problems are shown, not raised.
+        st.session_state["cal_error"] = f"Could not check Gmail: {error}"
+        return
+    if result.outcome is PollOutcome.IMPORTED and result.session.imported_path:
+        st.session_state.pop("cal_email_session", None)
+        st.session_state["cal_notice"] = f"Imported {result.session.original_filename} from Gmail."
+        _measure(st, session, Path(result.session.imported_path))
+    elif result.outcome is PollOutcome.NEEDS_SELECTION:
+        st.session_state["cal_error"] = "The scan email has several attachments; import it from the main scan flow."
+    elif result.outcome in (PollOutcome.FAILED, PollOutcome.TIMED_OUT):
+        st.session_state.pop("cal_email_session", None)
+        st.session_state["cal_error"] = f"Gmail import failed: {result.detail or result.session.error}"
+    else:
+        st.session_state["cal_notice"] = (
+            f"No new scan email yet ({result.detail or 'waiting'}). Send the scan, then check again."
+        )
 
 
 def _measure(st: Any, session: CalibrationSession, scan_path: Path) -> None:
@@ -82,6 +131,11 @@ def render_calibration_panel(st: Any) -> None:
             st.session_state.pop("cal_error", None)
         directory = st.session_state.get("cal_session")
         if not directory:
+            previous = _latest_session(queue, tray)
+            if previous is not None and st.button(f"Continue last calibration ({previous.name[-16:]})",
+                                                  key="cal_continue"):
+                st.session_state["cal_session"] = str(previous)
+                st.rerun()
             return
         session = CalibrationSession.load(Path(directory))
         round_number = session.next_round
@@ -97,8 +151,14 @@ def render_calibration_panel(st: Any) -> None:
             "2. Scan the printed sheet with Scan and Send, placed on the glass as for drawings.  \n"
             "3. Measure the scan below."
         )
+        if st.button("Check Gmail for the new scan", type="primary", key="cal_gmail"):
+            st.session_state.pop("cal_error", None)
+            _check_gmail(st, session)
+            st.rerun()
+        if st.session_state.get("cal_notice"):
+            st.caption(st.session_state["cal_notice"])
         latest = _latest_email_scan()
-        if latest is not None and st.button(f"Measure latest emailed scan ({latest.name})", key="cal_latest"):
+        if latest is not None and st.button(f"Measure last imported scan ({latest.name})", key="cal_latest"):
             _measure(st, session, latest)
             st.rerun()
         upload = st.file_uploader("…or upload the scan", type=["pdf", "png", "jpg", "jpeg", "tif", "tiff"],
