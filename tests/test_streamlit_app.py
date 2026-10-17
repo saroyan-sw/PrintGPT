@@ -100,3 +100,24 @@ def test_live_gemini_toggle_without_key_warns_and_blocks_generation(tmp_path, mo
         assert "mvp_run" not in app.session_state
         app.toggle[0].set_value(False).run()
         assert not app.button[1].disabled
+
+
+def test_complete_scanner_sheet_without_measurement_stays_locked(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PRINTGPT_SCANNER_PROFILE", str(tmp_path / "no_scanner_profile.json"))
+    page = np.full((3508, 2480, 3), 255, dtype=np.uint8)
+    cv2.rectangle(page, (250, 800), (2200, 2800), (0, 0, 0), 10)
+    app_path = Path(__file__).resolve().parents[1] / "src/printgpt_mvp/streamlit_app.py"
+    with patch("streamlit.file_uploader", return_value=_upload(page)):
+        app = AppTest.from_file(str(app_path), default_timeout=60).run()
+        app.button[0].click().run()
+        app.checkbox[0].check().run()
+        full_sheet = app.checkbox[1]
+        assert "complete A4 sheet" in full_sheet.label
+        full_sheet.check().run()
+        assert any("locked until the scanner placement is measured" in i.value for i in app.info)
+        app.button[1].click().run()
+        assert not app.exception and not app.error
+        run = app.session_state["mvp_run"]
+        assert run.alignment["registration"]["status"] == "awaiting_scanner_measurement"
+        assert any("locked until the scanner placement is measured" in w.value for w in app.warning)
