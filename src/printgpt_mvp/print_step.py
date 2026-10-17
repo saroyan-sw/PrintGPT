@@ -80,7 +80,13 @@ def render_print_step(st: Any, exported: Any | None) -> None:
     """Shown after approval; the only place in the main flow that can print."""
     if exported is None:
         return
-    st.subheader("Print onto your original")
+    spare_test = bool(getattr(exported, "spare_sheet_test", False))
+    st.subheader("Test print on a spare sheet" if spare_test else "Print onto your original")
+    if spare_test:
+        st.warning(
+            "Spare-sheet test: this page's placement on the paper is not measured. Print onto a copy of the drawing "
+            "or a spare sheet, never your original."
+        )
     st.image(str(exported.toner_png_path), caption="Exactly what will be printed (white = no toner)")
     profile = _render_profile(st)
 
@@ -133,7 +139,12 @@ def render_print_step(st: Any, exported: Any | None) -> None:
     st.markdown("**3. Confirm and print** — uses paper and toner")
     loaded = st.checkbox(profile.confirmation(), key="ps_confirm_loaded")
     spare_ok = True
-    if not profile.verified:
+    if spare_test:
+        spare_ok = st.checkbox(
+            "This is a spare test sheet, not my original (placement is not measured for this page).",
+            key="ps_confirm_spare",
+        )
+    elif not profile.verified:
         spare_ok = st.checkbox(
             "This is a spare test sheet, not my only original (the loading direction is not verified yet).",
             key="ps_confirm_spare",

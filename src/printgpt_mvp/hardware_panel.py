@@ -10,14 +10,32 @@ from pathlib import Path
 from typing import Any
 
 
+def _hardware_config():
+    """Hardware settings from the environment, falling back to the local ``.env``."""
+    import os
+
+    from printgpt_hardware_mcp.config import HardwareConfig
+    from printgpt_mvp.email_ingestion.settings import read_dotenv
+
+    return HardwareConfig.from_env({**read_dotenv(Path(".env")), **os.environ})
+
+
 def service_for(st: Any):
-    """The session's ``HardwareService``; tests inject a fake as ``hw_service``."""
+    """The session's ``HardwareService``; tests inject a fake as ``hw_service``.
+
+    A service the app created itself is rebuilt when the settings change (for
+    example ``PRINTGPT_HW_ALLOW_PRINT`` in ``.env``), so no restart is needed.
+    """
     service = st.session_state.get("hw_service")
-    if service is None:
+    if service is not None and not st.session_state.get("hw_service_owned"):
+        return service
+    config = _hardware_config()
+    if service is None or service.config != config:
         from printgpt_hardware_mcp.service import default_service
 
-        service = default_service()
+        service = default_service(config)
         st.session_state["hw_service"] = service
+        st.session_state["hw_service_owned"] = True
     return service
 
 

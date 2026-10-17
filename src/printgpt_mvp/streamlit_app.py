@@ -12,8 +12,10 @@ from printgpt_alignment import DEFAULT_LAYOUT
 from printgpt_alignment.document import load_document
 from printgpt_alignment.registration import RegistrationOptions
 
+from printgpt_mvp.calibration_panel import current_loop_profile, render_calibration_panel
 from printgpt_mvp.hardware_panel import render_hardware_panel
 from printgpt_mvp.print_step import render_print_step
+from printgpt_mvp.region_helper import RectMM, check_region, draw_region, suggest_region
 from printgpt_mvp.scanner_profile import measured_scanner_profile
 from printgpt_mvp.pipeline import (
     PRINT_AT_ACTUAL_SIZE,
@@ -52,6 +54,18 @@ _EMAIL_PROGRESS = {
     ScanSessionStatus.TIMED_OUT: "No scanner email arrived before the timeout",
     ScanSessionStatus.CANCELLED: "Waiting cancelled",
 }
+
+
+_REGION_KEYS = ("region_x", "region_y", "region_w", "region_h")
+_REGION_DEFAULTS = (40.0, 60.0, 130.0, 180.0)
+
+
+def _use_region(rect: RectMM) -> None:
+    """Button callback: runs before the rerun, so it may set the rectangle inputs."""
+    import streamlit as st
+
+    for key, value in zip(_REGION_KEYS, (rect.x, rect.y, rect.width, rect.height)):
+        st.session_state[key] = float(value)
 
 
 def _candidate_label(run: MvpRun, attempt_id: str) -> str:
@@ -262,6 +276,7 @@ def main() -> None:
     import streamlit as st
 
     st.set_page_config(page_title="PrintGPT MVP", layout="wide")
+    render_calibration_panel(st)
     st.title("PrintGPT — safe A4 completion preview")
     st.caption(
         "Choose either a full-page A4 scanner export or a marked calibration page. Output uses A4. "
@@ -398,10 +413,13 @@ def main() -> None:
         st.caption("Live Gemini is on. Each run makes paid requests; the offline doubles stay available.")
     st.subheader("Allowed completion rectangle (millimetres from the top-left)")
     columns = st.columns(4)
-    x_mm = columns[0].number_input("X", min_value=0.0, max_value=209.0, value=40.0, step=1.0)
-    y_mm = columns[1].number_input("Y", min_value=0.0, max_value=296.0, value=60.0, step=1.0)
-    width_mm = columns[2].number_input("Width", min_value=1.0, max_value=210.0, value=130.0, step=1.0)
-    height_mm = columns[3].number_input("Height", min_value=1.0, max_value=297.0, value=180.0, step=1.0)
+    for key, default in zip(_REGION_KEYS, _REGION_DEFAULTS):
+        st.session_state.setdefault(key, default)
+    x_mm = columns[0].number_input("X", min_value=0.0, max_value=209.0, step=1.0, key="region_x")
+    y_mm = columns[1].number_input("Y", min_value=0.0, max_value=296.0, step=1.0, key="region_y")
+    width_mm = columns[2].number_input("Width", min_value=1.0, max_value=210.0, step=1.0, key="region_w")
+    height_mm = columns[3].number_input("Height", min_value=1.0, max_value=297.0, step=1.0, key="region_h")
+    st.caption("The area is drawn on the A4 preview below. Use the suggested area or adjust the numbers.")
 
     explicit_registration = bool(
         source == _UPLOAD_SOURCE and confirmed_geometry and mode != "auto"
@@ -530,9 +548,27 @@ def main() -> None:
         f"**{orientation_labels.get(normalization.selected_rotation.value, normalization.selected_rotation.value)}** · "
         f"canonical: **{normalization.canonical_dimensions[0]} × {normalization.canonical_dimensions[1]} px**"
     )
-    st.image(normalization.canonical_rgb, caption="Normalized portrait A4 used by masking and generation")
+    region = RectMM(x_mm, y_mm, width_mm, height_mm)
+    suggestion = suggest_region(normalization.canonical_rgb, DEFAULT_LAYOUT)
+    st.image(
+        draw_region(normalization.canonical_rgb, region, DEFAULT_LAYOUT,
+                    suggestion=None if suggestion is None else suggestion.rect),
+        caption="Normalized portrait A4 used by masking and generation. Magenta: the area where new drawing "
+        "is allowed. Blue: suggested area.",
+    )
     for warning in normalization.warnings:
         st.warning(warning)
+    if suggestion is not None:
+        rect = suggestion.rect
+        st.caption(
+            f"Suggested area: X {rect.x:.0f}, Y {rect.y:.0f}, width {rect.width:.0f}, height {rect.height:.0f} mm "
+            f"({suggestion.reason})."
+        )
+        if rect != region:
+            st.button("Use suggested area", on_click=_use_region, args=(rect,), key="use_suggested_area")
+    region_problems = check_region(normalization.canonical_rgb, region, DEFAULT_LAYOUT)
+    for problem in region_problems:
+        st.warning(problem)
     if not explicit_registration:
         confirmed_normalization = st.checkbox(
             "I confirm the orientation and placement in this normalized A4 preview look correct.",
@@ -540,6 +576,7 @@ def main() -> None:
         )
         full_sheet = False
         scanner_profile = None
+        loop_profile = None
         if normalization.input_mode is InputMode.SCANNER_A4:
             full_sheet = st.checkbox(
                 "This scan shows the complete A4 sheet (scanned on the glass at A4, nothing cut off).",
@@ -547,22 +584,36 @@ def main() -> None:
                 help="Needed to print onto the original. It also needs the scanner placement measured once.",
             )
             scanner_profile = measured_scanner_profile()
-            if full_sheet and scanner_profile is None:
+            if scanner_profile is None:
+                loop_profile = current_loop_profile()
+            if full_sheet and scanner_profile is None and loop_profile is not None:
+                st.caption(
+                    f"Using the printer calibration from {loop_profile['measured_at'][:16].replace('T', ' ')} "
+                    f"(verified error {loop_profile['accuracy_bound_mm']:.2f} mm); prints will be corrected."
+                )
+            elif full_sheet and scanner_profile is None:
                 st.info(
-                    "Printing onto the original stays locked until the scanner placement is measured once "
-                    "(python -m printgpt_mvp.scanner_profile; see docs/mvp.md). You can still generate and preview."
+                    "Printing onto the original stays locked until the printer is calibrated (sidebar: Printer "
+                    "calibration) or the scanner placement is measured. You can still generate and preview."
                 )
             elif full_sheet:
                 st.caption(
                     f"Using the scanner profile measured {scanner_profile.get('measured_at')} "
                     f"(accuracy bound {scanner_profile['accuracy_bound_mm']:.2f} mm)."
                 )
+        region_accepted = True
+        if live_gemini and region_problems:
+            # Paid calls are spent only when the user overrules the area warnings explicitly.
+            region_accepted = st.checkbox(
+                "Generate anyway with this area (Live Gemini makes paid requests).", key="region_override"
+            )
         if st.button(
             "Generate two candidates",
             type="primary",
             disabled=(
                 not confirmed_normalization
                 or not live_ready
+                or not region_accepted
                 or bool(st.session_state.get("generation_completed_for_preview"))
             ),
         ):
@@ -601,6 +652,7 @@ def main() -> None:
                         backend=backend,
                         scanner_full_sheet_confirmed=full_sheet,
                         scanner_profile=scanner_profile if full_sheet else None,
+                        loop_profile=loop_profile if full_sheet else None,
                     )
                     st.session_state["generation_completed_for_preview"] = True
                     st.rerun()
@@ -631,8 +683,8 @@ def main() -> None:
         st.info("Source geometry registered under the recorded assumptions. Printer accuracy is unmeasured until calibrated; use sacrificial sheets first.")
     elif run.alignment.get("registration", {}).get("status") == "awaiting_scanner_measurement":
         st.warning(
-            "Preview is usable. Printing onto the original is locked until the scanner placement is measured "
-            "once (python -m printgpt_mvp.scanner_profile; see docs/mvp.md)."
+            "Preview is usable. Printing onto the original is locked until the printer is calibrated (sidebar: "
+            "Printer calibration) or the scanner placement is measured."
         )
     else:
         st.warning("Preview is usable, but export onto the original sheet is blocked until physical geometry is confirmed.")
@@ -690,10 +742,19 @@ def main() -> None:
             st.session_state.pop("approved_export", None)
             st.session_state["export_candidate"] = choice
         confirmed = st.checkbox("I approve this sanitized new-ink preview for A4 export.", key="approve_preview")
-        if st.button("Approve and create toner-only files", disabled=not (confirmed and registered)):
+        spare_test = False
+        if not registered:
+            spare_test = st.checkbox(
+                "Test print on a SPARE sheet only: placement on the paper is not measured, so the new ink may land "
+                "a few millimetres off. I will not use my original.",
+                key="spare_sheet_test",
+            )
+        if st.button("Approve and create toner-only files", disabled=not (confirmed and (registered or spare_test))):
             try:
                 profile = json.loads(Path(profile_path).read_text(encoding="utf-8")) if profile_path.strip() else None
-                st.session_state["approved_export"] = approve_and_export(run, choice, approved=True, printer_profile=profile)
+                st.session_state["approved_export"] = approve_and_export(
+                    run, choice, approved=True, printer_profile=profile, spare_sheet_test=spare_test and not registered
+                )
             except Exception as error:
                 st.error(str(error))
 

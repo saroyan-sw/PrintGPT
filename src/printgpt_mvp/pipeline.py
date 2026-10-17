@@ -106,6 +106,8 @@ class ApprovedExport:
     a4_pdf_path: Path
     manifest_path: Path
     print_instruction: str = PRINT_AT_ACTUAL_SIZE
+    # Unregistered placement: only ever for a spare test sheet, never the original.
+    spare_sheet_test: bool = False
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -333,6 +335,7 @@ def run_offline_document(
     gemini_client: Any | None = None,
     scanner_full_sheet_confirmed: bool = False,
     scanner_profile: dict[str, Any] | None = None,
+    loop_profile: dict[str, Any] | None = None,
 ) -> MvpRun:
     """Run alignment, masking, generation, validation, criticism, and selection.
 
@@ -345,9 +348,16 @@ def run_offline_document(
     scan-to-paper profile (``printgpt_mvp.scanner_profile``); the page is then
     resampled into physical paper coordinates. Confirmation alone leaves export
     locked with status ``awaiting_scanner_measurement``.
+
+    ``loop_profile`` (``printgpt_mvp.loop_calibration``) is the alternative to a
+    scanner profile: it measures the whole scan -> print loop for one printer.
+    The page then stays in scan coordinates and the export is corrected by the
+    profile's loop correction.
     """
     if scanner_profile is not None and scanner_profile.get("status") != "measured":
         raise ValueError("scanner_profile must be a measured profile")
+    if loop_profile is not None and loop_profile.get("status") != "measured":
+        raise ValueError("loop_profile must be a measured, verified profile")
     backend = GenerationBackend(backend)
     config = GenerationConfig(layout=layout)
     if backend is GenerationBackend.GEMINI:
@@ -422,7 +432,16 @@ def run_offline_document(
         )
         if scanner_full_sheet:
             mode = "scanner_full_sheet"
-            if scanner_profile is None:
+            if scanner_profile is None and loop_profile is not None:
+                registered, status = True, "registered"
+                source_accuracy = float(loop_profile["accuracy_bound_mm"])
+                evidence = (
+                    f"complete sheet confirmed by the user; print-scan loop calibration for "
+                    f"{loop_profile.get('printer_queue')} / {loop_profile.get('tray')} from "
+                    f"{loop_profile.get('measured_at')} (verified error {source_accuracy:.2f} mm)"
+                )
+                scale_and_origin = "scan coordinates; export corrected by the loop calibration"
+            elif scanner_profile is None:
                 status = "awaiting_scanner_measurement"
                 evidence = "complete sheet confirmed by the user; scanner placement not measured yet"
             else:
@@ -453,6 +472,10 @@ def run_offline_document(
                 "scale_and_origin": scale_and_origin,
                 "measured_source_accuracy_mm": source_accuracy,
                 "printer_accuracy": "unmeasured",
+                **({"loop_correction_mm": loop_profile["correction_mm"],
+                    "loop_calibration": {key: loop_profile.get(key) for key in
+                                         ("printer_queue", "tray", "measured_at", "accuracy_bound_mm", "rounds")}}
+                   if scanner_full_sheet and scanner_profile is None and loop_profile is not None else {}),
             },
             coordinate_system={
                 "origin": "physical paper top-left",
@@ -585,8 +608,14 @@ def _write_toner_outputs(
 
 
 def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
-                       printer_profile: dict[str, Any] | None = None) -> ApprovedExport:
-    """Export only an explicitly approved, ranked, non-simulated sanitized mask."""
+                       printer_profile: dict[str, Any] | None = None,
+                       spare_sheet_test: bool = False) -> ApprovedExport:
+    """Export only an explicitly approved, ranked, non-simulated sanitized mask.
+
+    ``spare_sheet_test`` allows a page whose physical placement is not registered
+    to be exported for a test print on a spare sheet. The export and its approval
+    record are marked as such; every other check still applies.
+    """
     if not approved:
         raise PermissionError("explicit user approval is required before export")
     if run.generation.simulated_validation:
@@ -599,10 +628,19 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
         raise ValueError("candidate validation is missing, rejected, or simulated")
     if attempt.sanitized_new_ink_mask is None:
         raise ValueError("candidate has no sanitized new-ink mask")
-    if not run.alignment.get("registration", {}).get("export_allowed", False):
+    registered = bool(run.alignment.get("registration", {}).get("export_allowed", False))
+    if not registered and not spare_sheet_test:
         raise ValueError("preview only: confirm physical scale and paper origin before exporting onto the original sheet")
+    spare_sheet_test = spare_sheet_test and not registered
+    if spare_sheet_test and printer_profile is not None:
+        raise ValueError("a printer correction needs registered source geometry; spare-sheet tests use none")
     layout = run.generation.config.layout
     correction = None
+    loop_correction = (run.alignment.get("registration") or {}).get("loop_correction_mm")
+    if loop_correction is not None and not spare_sheet_test:
+        if printer_profile is not None:
+            raise ValueError("the loop calibration already includes the printer; do not add a printer profile")
+        correction = np.asarray(loop_correction, dtype=np.float64)
     if printer_profile is not None:
         from printgpt_alignment.printer_calibration import validated_correction
         correction = validated_correction(printer_profile)
@@ -637,13 +675,19 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
         "toner_png": png_path.relative_to(run.output_dir).as_posix(),
         "a4_pdf": pdf_path.relative_to(run.output_dir).as_posix(),
     }
+    alignment = run.alignment
+    if spare_sheet_test:
+        alignment = {**alignment, "registration": {
+            **(alignment.get("registration") or {}),
+            "status": "unregistered_spare_sheet_test", "export_allowed": False, "spare_sheet_test": True,
+        }}
     _write_json(
         run.manifest_path,
         _manifest_payload(run.generation, selected, run.normalization,
                           approved=True, exported_paths=exported,
-                          alignment=run.alignment, printer=printer_profile),
+                          alignment=alignment, printer=printer_profile),
     )
-    registration = run.alignment.get("registration") or {}
+    registration = alignment.get("registration") or {}
     write_print_approval(
         run_dir=run.output_dir,
         run_id=run.generation.run_id,
@@ -664,4 +708,5 @@ def approve_and_export(run: MvpRun, attempt_id: str, *, approved: bool,
         },
         printer_correction_applied=correction is not None,
     )
-    return ApprovedExport(selected.candidate_id, selected.attempt_id, png_path, pdf_path, run.manifest_path)
+    return ApprovedExport(selected.candidate_id, selected.attempt_id, png_path, pdf_path, run.manifest_path,
+                          spare_sheet_test=spare_sheet_test)

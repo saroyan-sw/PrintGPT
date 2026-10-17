@@ -144,6 +144,52 @@ The PNG and PDF are built from `sanitized_new_ink_mask` only:
 Print `approved_a4_actual_size.pdf` at **100% or Actual Size**. Disable Fit,
 Shrink, Scale to Fit, borderless expansion, and automatic rotation.
 
+## Printer calibration (print–scan loop)
+
+The sidebar's **Printer calibration** measures the whole loop PrintGPT relies
+on (scan the sheet → compute ink → print back onto it) with no ruler
+(`printgpt_mvp.loop_calibration`):
+
+1. **Start a new calibration** and download the round's page: 24 ArUco
+   markers spread over A4 (`DICT_5X5_100`), as an exact-size PDF.
+2. Print it at **100% / Actual size** from the tray you use for originals, and
+   scan the printed sheet with Scan and Send, placed on the glass as for drawings.
+3. **Measure** the latest emailed scan (or upload it). Half the markers fit an
+   affine map from target to scan position; the other half check it. The table
+   shows each round's real printed error, offset, and scale. "Fit to page"
+   (scale ≈ 0.95) and skew are reported as problems and do not update the
+   correction.
+4. The next round's page is printed with the updated correction
+   (`C' = C ∘ R⁻¹`, where `R` is the measured map). Repeat; the error should drop
+   after the first correction and then settle at the printer's sheet-to-sheet
+   variation.
+5. **Save calibration** is enabled once a *corrected* round measures under
+   0.5 mm on every marker. The profile is saved per printer queue and tray in
+   `%LOCALAPPDATA%\PrintGPT\calibration\` (override `PRINTGPT_CALIBRATION_DIR`),
+   so a demo reuses it without calibrating again.
+
+With a saved profile, a Scanner A4 page confirmed as the complete sheet is
+`registered` (evidence: the loop calibration), and every export is corrected
+by the profile. A profile is valid only for the loop it measured: the same
+scanner workflow, printer, tray, and 100% printing. Recalibrate if any change.
+
+## Choosing the allowed area
+
+The allowed rectangle is drawn on the normalized A4 preview (magenta) before
+generation. `region_helper` suggests an area (blue): the empty strip on the side
+where the drawing looks cut off (most strokes end at that edge), from the
+drawing's edge to a 6 mm printable margin. "Use suggested area" fills in the
+numbers. Before generation the rectangle is checked, and warnings explain when:
+
+- it covers more than 25% of the existing drawing (new ink cannot go on or
+  next to existing lines);
+- the drawing looks cut off on one side but the area covers less than half of
+  the space there (the continuation would be drawn outside and rejected);
+- it is very small, or it reaches into the 6 mm margin the printer cannot print.
+
+With Live Gemini on, generation with warnings needs an explicit "Generate
+anyway" tick, so paid requests are not spent on an area that is probably wrong.
+
 ## Printing onto the original (main flow)
 
 After approval, the app shows **Print onto your original** (`print_step`).
