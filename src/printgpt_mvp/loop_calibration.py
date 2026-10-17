@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -247,10 +248,21 @@ class CalibrationSession:
 
     def add_scan(self, scan_rgb: np.ndarray, scan_name: str, layout: A4CalibrationLayout = DEFAULT_LAYOUT,
                  now: datetime | None = None) -> dict[str, Any]:
-        """Measure a scan of the latest printed round and update the correction."""
+        """Measure a scan of the latest printed round and update the correction.
+
+        A scan that was already measured is refused: measuring it again would
+        apply its correction twice and overshoot.
+        """
+        fingerprint = sha256(np.ascontiguousarray(scan_rgb).tobytes()).hexdigest()
+        for earlier in self.rounds:
+            if earlier.get("scan_sha256") == fingerprint:
+                raise ValueError(
+                    f"this scan was already measured as round {earlier['round']}; print the round "
+                    f"{self.next_round} page, scan it, and measure that new scan"
+                )
         measurement = measure_round(scan_rgb, layout)
         printed_with = self.correction
-        result = {"round": self.next_round, "scan": scan_name,
+        result = {"round": self.next_round, "scan": scan_name, "scan_sha256": fingerprint,
                   "measured_at": (now or datetime.now(UTC)).isoformat(timespec="seconds"),
                   "printed_with_correction": printed_with.tolist(), "corrected": len(self.rounds) > 0,
                   **measurement}
@@ -287,7 +299,8 @@ class CalibrationSession:
             "measured_at": (now or datetime.now(UTC)).isoformat(timespec="seconds"),
             "session": str(self.directory),
             "rounds": len(self.rounds),
-            "correction_mm": self.data["correction_mm"],
+            # The correction that produced the verified print, not a later, untested refinement.
+            "correction_mm": verified["printed_with_correction"],
             "verified_round": verified["round"],
             "verified_error": verified["printed_error"],
             "accuracy_bound_mm": verified["printed_error"]["max_mm"],

@@ -110,3 +110,23 @@ def test_an_upside_down_scan_is_turned_and_measured(tmp_path) -> None:
     measurement = measure_round(scan, LAYOUT)
     assert measurement["scan_turned_degrees"] == 180 and not measurement["problems"]
     assert measurement["offset_mm_at_centre"] == pytest.approx([0.45, -1.2], abs=0.2)
+
+
+def test_measuring_the_same_scan_twice_is_refused(tmp_path) -> None:
+    session = CalibrationSession.start(tmp_path, "Canon", "bypass")
+    pdf = session.target_for_next_round(LAYOUT)
+    scan = _print_and_scan(pdf.with_name("approved_toner_only.png"), _loop())
+    session.add_scan(scan, "first", LAYOUT)
+    correction = session.correction.copy()
+    with pytest.raises(ValueError, match="already measured as round 1"):
+        session.add_scan(scan, "same again", LAYOUT)
+    assert len(session.rounds) == 1 and np.allclose(session.correction, correction)
+
+
+def test_profile_keeps_the_correction_that_was_verified_on_paper(tmp_path) -> None:
+    session = CalibrationSession.start(tmp_path, "Canon", "bypass")
+    for index in range(2):
+        pdf = session.target_for_next_round(LAYOUT)
+        session.add_scan(_print_and_scan(pdf.with_name("approved_toner_only.png"), _loop(), seed=index), str(index), LAYOUT)
+    profile = session.profile()
+    assert np.allclose(profile["correction_mm"], session.rounds[-1]["printed_with_correction"])
