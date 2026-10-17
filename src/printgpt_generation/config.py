@@ -66,6 +66,7 @@ class GenerationSettings(BaseModel):
     min_sub_score: float = Field(5.0, ge=0, le=10)
     source_redraw_tolerance_mm: float = Field(1.0, ge=0)
     max_registration_shift_mm: float = Field(0.5, ge=0)
+    auto_align: bool = True
     recursion_limit: int = Field(DEFAULT_RECURSION_LIMIT, ge=10, le=500)
 
     @classmethod
@@ -81,6 +82,7 @@ class GenerationSettings(BaseModel):
             extraction=ExtractionConfig(
                 source_redraw_tolerance_mm=self.source_redraw_tolerance_mm,
                 max_registration_shift_mm=self.max_registration_shift_mm,
+                auto_align=self.auto_align,
             ),
             critic=CriticThresholds(
                 self.min_critic_score, self.min_sub_score, self.min_sub_score, self.min_sub_score

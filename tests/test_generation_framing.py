@@ -105,10 +105,23 @@ def test_crop_output_is_pasted_into_its_window() -> None:
 
 def test_shift_inside_the_window_is_rejected_although_the_page_is_unchanged() -> None:
     raw, box, page, existing = _crop_output(shift_mm=3.0)
-    outcome = normalize_and_extract(raw, existing, LAYOUT, CONFIG, source_page=page, canvas_box=box.as_tuple())
+    no_alignment = ExtractionConfig(auto_align=False)
+    outcome = normalize_and_extract(raw, existing, LAYOUT, no_alignment, source_page=page, canvas_box=box.as_tuple())
     assert not outcome.accepted
     assert outcome.record.canvas_box == box.as_tuple()
     assert outcome.record.registration is not None and outcome.record.registration.estimated_shift_mm > 2.0
+
+
+def test_shift_inside_the_window_is_corrected_before_the_strict_check() -> None:
+    raw, box, page, existing = _crop_output(shift_mm=3.0)
+    outcome = normalize_and_extract(raw, existing, LAYOUT, CONFIG, source_page=page, canvas_box=box.as_tuple())
+    assert outcome.accepted, outcome.record.failure_reasons
+    alignment = outcome.record.alignment
+    assert alignment is not None and alignment.applied
+    assert abs(alignment.centre_shift_mm[0] - 3.0) < 0.4 and abs(alignment.centre_shift_mm[1]) < 0.4
+    assert outcome.record.registration.estimated_shift_mm <= CONFIG.max_registration_shift_mm
+    # The recorded transform includes the correction: raw x maps 3 mm further left.
+    assert abs(outcome.record.raw_to_canonical[0][2] - (box.x - _px(3.0))) < 2
 
 
 def test_crop_output_must_match_the_window_aspect() -> None:

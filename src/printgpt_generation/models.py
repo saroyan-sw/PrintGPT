@@ -166,6 +166,24 @@ class RegistrationReport:
 
 
 @dataclass(frozen=True, slots=True)
+class AlignmentReport:
+    """Old-to-old correction estimated before the registration check.
+
+    ``centre_shift_mm`` is (x, y) movement of the window centre and
+    ``max_displacement_mm`` the largest movement of any window corner.
+    """
+
+    applied: bool
+    centre_shift_mm: tuple[float, float]
+    max_displacement_mm: float
+    scale: float
+    rotation_deg: float
+    anisotropy: float
+    correlation: float
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExtractionReport:
     method: str
     candidate_ink_pixels: int
@@ -187,6 +205,8 @@ class NormalizationRecord:
     failure_reasons: tuple[str, ...] = ()
     # Window of the page the raw output depicts; registration was measured inside it.
     canvas_box: tuple[int, int, int, int] | None = None
+    # Correction applied (or considered) before registration; included in ``raw_to_canonical``.
+    alignment: AlignmentReport | None = None
 
 
 @dataclass(frozen=True, slots=True, eq=False)

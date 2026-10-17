@@ -173,8 +173,16 @@ def test_critic_receives_a_close_up_of_the_region() -> None:
     assert close_up.shape[0] < page.shape[0]
 
 
-def test_shifted_crop_is_rejected_inside_the_window() -> None:
+def test_evenly_shifted_crop_is_aligned_back() -> None:
     result = _run(FakeGemini(shift_mm=3.0))
+    attempt = result.attempts[0]
+    assert attempt.status is AttemptStatus.CRITICIZED
+    assert attempt.normalization is not None and attempt.normalization.alignment is not None
+    assert attempt.normalization.alignment.applied
+
+
+def test_shift_beyond_the_alignment_limit_is_rejected_inside_the_window() -> None:
+    result = _run(FakeGemini(shift_mm=8.0))
     attempt = result.attempts[0]
     assert attempt.status is AttemptStatus.GEOMETRY_REJECTED
     assert attempt.normalization is not None

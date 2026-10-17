@@ -33,15 +33,17 @@ the page has too little ink to measure, registration is recorded as unverified.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
 
 from printgpt_alignment.geometry import A4CalibrationLayout, mm_to_px, px_to_mm
 
+from .alignment import apply_alignment, as_homogeneous, downsample_mask, estimate_alignment
 from .framing import PixelBox, full_box
 from .models import (
+    AlignmentReport,
     BinaryMask,
     ExtractionReport,
     NormalizationRecord,
@@ -65,6 +67,13 @@ class ExtractionConfig:
     min_source_ink_pixels_for_registration: int = 50
     min_component_area_mm2: float = 0.5
     registration_max_side_px: int = 1024
+    # Old-to-old correction before the registration check (see ``alignment``).
+    auto_align: bool = True
+    max_alignment_shift_mm: float = 5.0
+    max_alignment_scale_change: float = 0.05
+    max_alignment_rotation_deg: float = 2.0
+    max_alignment_anisotropy: float = 0.02
+    alignment_blur_mm: float = 1.0
 
     def __post_init__(self) -> None:
         if not 0 <= self.aspect_ratio_tolerance < 1:
@@ -86,6 +95,14 @@ class ExtractionConfig:
             raise ValueError("min_component_area_mm2 cannot be negative")
         if self.registration_max_side_px < 64:
             raise ValueError("registration_max_side_px must be at least 64")
+        if (
+            self.max_alignment_shift_mm < 0
+            or not 0 <= self.max_alignment_scale_change < 0.5
+            or not 0 <= self.max_alignment_rotation_deg <= 45
+            or self.max_alignment_anisotropy < 0
+            or self.alignment_blur_mm <= 0
+        ):
+            raise ValueError("alignment limits are out of range")
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -112,6 +129,7 @@ def _rejection(
     aspect_error: float = 0.0,
     registration: RegistrationReport | None = None,
     canvas_box: PixelBox | None = None,
+    alignment: AlignmentReport | None = None,
 ) -> NormalizationOutcome:
     record = NormalizationRecord(
         input_shape=input_shape,
@@ -121,6 +139,7 @@ def _rejection(
         extraction=None,
         failure_reasons=tuple(reasons),
         canvas_box=None if canvas_box is None else canvas_box.as_tuple(),
+        alignment=alignment,
     )
     return NormalizationOutcome(record, None)
 
@@ -141,6 +160,10 @@ def to_rgb_uint8(image: np.ndarray) -> RGBImage | None:
         composited = image[:, :, :3].astype(np.float32) * alpha + 255.0 * (1.0 - alpha)
         return np.clip(np.rint(composited), 0, 255).astype(np.uint8)
     return None
+
+
+def _rows(matrix: np.ndarray) -> tuple[tuple[float, float, float], ...]:
+    return tuple(tuple(float(value) for value in row) for row in matrix)  # type: ignore[return-value]
 
 
 def _scale_transform(
@@ -172,15 +195,6 @@ def _within_distance(mask: np.ndarray, distance_px: float) -> np.ndarray:
     return distances <= distance_px
 
 
-def _downsample_for_registration(mask: np.ndarray, max_side: int) -> tuple[np.ndarray, float]:
-    factor = max(mask.shape) / float(max_side)
-    if factor <= 1.0:
-        return mask.astype(np.float32), 1.0
-    size = (int(round(mask.shape[1] / factor)), int(round(mask.shape[0] / factor)))
-    small = cv2.resize(mask.astype(np.float32), size, interpolation=cv2.INTER_AREA)
-    return small, factor
-
-
 def check_registration(
     source_ink: np.ndarray,
     candidate_ink: np.ndarray,
@@ -192,8 +206,8 @@ def check_registration(
     if source_pixels < config.min_source_ink_pixels_for_registration:
         return RegistrationReport(False, (0.0, 0.0), 0.0, 0.0, source_pixels, 1.0)
 
-    source_small, factor = _downsample_for_registration(source_ink, config.registration_max_side_px)
-    candidate_small, _ = _downsample_for_registration(candidate_ink, config.registration_max_side_px)
+    source_small, factor = downsample_mask(source_ink, config.registration_max_side_px)
+    candidate_small, _ = downsample_mask(candidate_ink, config.registration_max_side_px)
     (shift_x, shift_y), response = cv2.phaseCorrelate(source_small, candidate_small)
     shift_px = (float(shift_x) * factor, float(shift_y) * factor)
     shift_mm = px_to_mm(float(np.hypot(*shift_px)), layout.dpi)
@@ -334,11 +348,63 @@ def normalize_and_extract(
             canvas_box=window if cropped else None,
         )
 
-    transform = _scale_transform(target_width / width, target_height / height, float(window.x), float(window.y))
+    scale_transform = _scale_transform(target_width / width, target_height / height)
     if (height, width) == (target_height, target_width):
         window_rgb = rgb
     else:
         window_rgb = cv2.resize(rgb, (target_width, target_height), interpolation=cv2.INTER_AREA)
+    window_additions = None
+    if additions_mask is not None:
+        resized = cv2.resize(
+            (np.asarray(additions_mask) > 0).astype(np.uint8),
+            (target_width, target_height),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        window_additions = resized > 0
+
+    existing = existing_ink_mask > 0
+    registration_source = existing
+    if source_page is not None:
+        require_rgb_image(source_page, layout.image_shape, "source_page")
+        registration_source = existing & dark_neutral_ink(source_page, config)[0]
+    window_source = window.crop(registration_source)
+    window_neutral, window_coloured = dark_neutral_ink(window_rgb, config)
+
+    alignment = None
+    correction = np.eye(3)
+    if config.auto_align:
+        matrix, alignment = estimate_alignment(
+            window_source,
+            window_neutral,
+            layout,
+            max_side_px=config.registration_max_side_px,
+            blur_mm=config.alignment_blur_mm,
+            max_shift_mm=config.max_alignment_shift_mm,
+            max_scale_change=config.max_alignment_scale_change,
+            max_rotation_deg=config.max_alignment_rotation_deg,
+            max_anisotropy=config.max_alignment_anisotropy,
+            min_source_pixels=config.min_source_ink_pixels_for_registration,
+        )
+        if matrix is not None:
+            aligned_rgb = apply_alignment(window_rgb, matrix)
+            aligned_neutral, aligned_coloured = dark_neutral_ink(aligned_rgb, config)
+            before = check_registration(window_source, window_neutral, layout, config)
+            after = check_registration(window_source, aligned_neutral, layout, config)
+            # Keep a correction only if it brings the original ink closer to the source.
+            if (
+                after.source_retention >= before.source_retention
+                and after.estimated_shift_mm <= before.estimated_shift_mm
+            ):
+                window_rgb, window_neutral, window_coloured = aligned_rgb, aligned_neutral, aligned_coloured
+                if window_additions is not None:
+                    window_additions = apply_alignment(window_additions.astype(np.uint8), matrix, nearest=True) > 0
+                # Corrected pixel x samples the uncorrected window at matrix @ x.
+                correction = np.linalg.inv(as_homogeneous(matrix))
+            else:
+                alignment = replace(alignment, applied=False, reason="not applied: did not improve registration")
+    offset = np.array(_scale_transform(1.0, 1.0, float(window.x), float(window.y)))
+    transform = _rows(offset @ correction @ np.array(scale_transform))
+
     if cropped:
         assert source_page is not None
         require_rgb_image(source_page, layout.image_shape, "source_page")
@@ -347,13 +413,7 @@ def normalize_and_extract(
     else:
         canonical = window_rgb
 
-    existing = existing_ink_mask > 0
-    window_neutral, window_coloured = dark_neutral_ink(window_rgb, config)
-    registration_source = existing
-    if source_page is not None:
-        require_rgb_image(source_page, layout.image_shape, "source_page")
-        registration_source = existing & dark_neutral_ink(source_page, config)[0]
-    registration = check_registration(window.crop(registration_source), window_neutral, layout, config)
+    registration = check_registration(window_source, window_neutral, layout, config)
     failures = _registration_failures(registration, config)
     record_box = window.as_tuple() if cropped else None
     if failures:
@@ -364,6 +424,7 @@ def normalize_and_extract(
             aspect_error=aspect_error,
             registration=registration,
             canvas_box=window if cropped else None,
+            alignment=alignment,
         )
 
     # Extraction runs on the full page so the redraw band also covers original
@@ -373,14 +434,9 @@ def normalize_and_extract(
     neutral_ink[window.slices()] = window_neutral
     coloured[window.slices()] = window_coloured
     additions_layer = None
-    if additions_mask is not None:
-        resized = cv2.resize(
-            (np.asarray(additions_mask) > 0).astype(np.uint8),
-            (target_width, target_height),
-            interpolation=cv2.INTER_NEAREST,
-        )
+    if window_additions is not None:
         additions_layer = np.zeros(layout.image_shape, dtype=bool)
-        additions_layer[window.slices()] = resized > 0
+        additions_layer[window.slices()] = window_additions
     new_ink, extraction = extract_new_ink(
         canonical, existing_ink_mask, layout, config, additions_layer, (neutral_ink, coloured)
     )
@@ -391,5 +447,6 @@ def normalize_and_extract(
         registration=registration,
         extraction=extraction,
         canvas_box=record_box,
+        alignment=alignment,
     )
     return NormalizationOutcome(record, NormalizedCandidate(readonly_copy(canonical), readonly_copy(new_ink)))

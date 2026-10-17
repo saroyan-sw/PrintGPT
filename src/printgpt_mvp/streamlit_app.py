@@ -630,6 +630,14 @@ def main() -> None:
             if candidate.attempt.preview_rgb is not None:
                 right.image(candidate.attempt.preview_rgb, caption="Sanitized additions in paper coordinates — printer mechanics not simulated")
             metrics = candidate.attempt.validation.metrics if candidate.attempt.validation else {}
+            normalization = candidate.attempt.normalization
+            alignment = None if normalization is None else normalization.alignment
+            if alignment is not None and alignment.applied:
+                st.caption(
+                    f"Model output was realigned onto the original: shifted "
+                    f"{alignment.centre_shift_mm[0]:+.2f} / {alignment.centre_shift_mm[1]:+.2f} mm, "
+                    f"scale {alignment.scale:.3f}, rotation {alignment.rotation_deg:+.2f}°."
+                )
             st.caption(
                 f"Validation accepted · final ink pixels: {metrics.get('final_ink_count', '—')} · "
                 f"removed fraction: {float(metrics.get('removed_fraction', 0.0)):.3f}"

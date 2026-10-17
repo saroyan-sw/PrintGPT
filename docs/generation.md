@@ -55,7 +55,9 @@ who want to stream node updates. `initial_state(request)` builds its input.
 | `providers.py` | Generator/critic protocols, provider errors, bounded retries, clock/ID sources |
 | `doubles.py` | Deterministic generator and critic doubles |
 | `guidance.py` | Region-guidance image (never printable) |
+| `alignment.py` | Bounded old-to-old correction before the registration check |
 | `extraction.py` | Output normalization, registration checks, new-ink extraction |
+| `framing.py` | Pixel windows, crop framing, and aspect fitting |
 | `critic.py` | Pydantic critic schema, parsing, threshold interpretation |
 | `ranking.py` | Revision decision, eligibility, per-candidate selection, ranking |
 | `track_a.py` | Structural protocols for Track A types, Track A adapter, simulated doubles |
@@ -106,6 +108,32 @@ Provider output convention: the complete page, portrait, with the same framing
 aspect ratio is within 1% of the canonical raster. It is mapped with one
 recorded uniform scale (`raw_to_canonical`). Other geometry is rejected as
 `geometry_rejected`.
+
+Alignment (before registration): models that redraw the page often move all of
+it slightly, and draw their new strokes relative to their own moved copy. The
+`alignment` module therefore maps the model's copy of the original ink back
+onto the real original ink with a bounded similarity transform, and applies the
+same correction to the new strokes:
+
+- estimated on downsampled, blurred ink masks, only near the original ink, so
+  new content cannot pull the fit;
+- a pure shift is preferred; scale and rotation are used only if they fit
+  clearly better. Starting from both no movement and the phase-correlation
+  shift, the smaller movement wins ties, so evenly spaced text lines are not
+  matched one line off;
+- limits (`ExtractionConfig`): shift ≤ 5 mm at the window centre, scale within
+  ±5%, rotation ≤ 2°, near-zero shear. Outside them nothing is corrected;
+- a correction is kept only if it brings the original ink closer. Corrections
+  below one pixel or 0.1 mm are ignored;
+- `NormalizationRecord.alignment` records it, and `raw_to_canonical` includes it.
+  `auto_align=False` turns it off.
+
+This is a correction step, not a relaxation: the strict registration check
+below runs afterwards, unchanged. Uneven distortion cannot be fitted by one
+similarity transform and is still rejected. On a real Gemini app output
+(`tests/fixtures/gemini_shift`), the text had moved 1.06 / 1.32 mm. After
+alignment, the remaining shift was 0.08 mm with 100% retention at 300 DPI, so
+the output passed the strict check.
 
 Registration: phase correlation of original ink against candidate ink estimates
 global movement (maximum 0.5 mm). At least 85% of original ink must still be
@@ -271,8 +299,10 @@ made yet. The pytest smoke test runs with `PRINTGPT_LIVE_GEMINI=1` and
 
 - Only black line art on light paper is supported. Coloured strokes count as
   guidance colour and are discarded.
-- Registration detects a global shift only. Local warping is caught only through
-  the retention threshold.
+- Alignment corrects one global shift, scale and rotation. Local warping is not
+  corrected; it is caught by the registration and retention checks.
+- Marks smaller than 0.5 mm² (`min_component_area_mm2`), such as dots, colons and
+  hyphens in small text, are removed as noise.
 - New strokes stop about 1 mm (`source_redraw_tolerance_mm`) short of original
   ink.
 - Synchronous provider timeouts are enforced by adapters (the Gemini HTTP

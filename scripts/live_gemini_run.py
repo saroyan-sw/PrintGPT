@@ -52,6 +52,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--backend", choices=[item.value for item in GenerationBackend], default="offline")
     parser.add_argument("--confirm-paid", action="store_true", help="required for --backend gemini")
     parser.add_argument("--framing", choices=["crop", "full_page"], default="crop")
+    parser.add_argument("--image-size", choices=["512", "1K", "2K", "4K"], default="2K",
+                        help="Gemini output size; 1K is cheaper for first tests")
     parser.add_argument("--image-model", default=None)
     parser.add_argument("--critic-model", default=None)
     parser.add_argument("--orientation", choices=[item.value for item in OrientationChoice], default="auto")
@@ -121,6 +123,14 @@ def _attempt_record(attempt: AttemptRecord) -> dict[str, Any]:
         "normalization": None if normalization is None else {
             "aspect_ratio_error": round(normalization.aspect_ratio_error, 5),
             "failure_reasons": list(normalization.failure_reasons),
+        },
+        "alignment": None if normalization is None or normalization.alignment is None else {
+            "applied": normalization.alignment.applied,
+            "reason": normalization.alignment.reason,
+            "centre_shift_mm": [round(value, 3) for value in normalization.alignment.centre_shift_mm],
+            "scale": round(normalization.alignment.scale, 4),
+            "rotation_deg": round(normalization.alignment.rotation_deg, 3),
+            "correlation": round(normalization.alignment.correlation, 3),
         },
         "registration": None if registration is None else {
             "verified": registration.verified,
@@ -205,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         os.environ[GEMINI_API_KEY_ENV] = key
         from printgpt_generation.gemini import GeminiSettings
 
-        overrides = {"framing": args.framing}
+        overrides = {"framing": args.framing, "image_size": args.image_size}
         if args.image_model:
             overrides["image_model"] = args.image_model
         if args.critic_model:
@@ -247,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         "input": str(args.input),
         "allowed_region_mm": {"x": x, "y": y, "width": width, "height": height},
         "framing": args.framing if backend is GenerationBackend.GEMINI else "offline_double",
+        "image_size": args.image_size if backend is GenerationBackend.GEMINI else None,
         "generator_model_id": generation.generator_model_id,
         "critic_model_id": generation.critic_model_id,
         "google_genai_version": _sdk_version(),
@@ -273,7 +284,9 @@ def main(argv: list[str] | None = None) -> int:
     for item in report["attempts"]:
         registration = item["registration"] or {}
         critic = item["critic"] or {}
-        print(f"  {item['attempt_id']:<24} {item['status']:<20} shift {registration.get('estimated_shift_mm')} mm | "
+        alignment = item["alignment"] or {}
+        print(f"  {item['attempt_id']:<24} {item['status']:<20} corrected {alignment.get('centre_shift_mm')} mm | "
+              f"residual {registration.get('estimated_shift_mm')} mm | "
               f"retention {registration.get('source_retention')} | score {critic.get('score')} | "
               f"failure {item['generation']['failure']}")
     print(f"report: {report_path}\ncontact sheet: {out / 'contact_sheet.png'}")
