@@ -89,9 +89,8 @@ def prepare(args: argparse.Namespace) -> int:
     _save(out / "2_guidance_crop.png", frame.prepare(guidance, forbidden))
     _save(out / "3_context_thumbnail.png", context_thumbnail(page, frame.box, 1024))
     resolved = resolve_user_prompt(args.prompt)
-    for index, name in enumerate("AB"):
-        text = f"{build_generation_prompt(resolved, index)}\n\n{_CONTEXT_NOTE}\n"
-        (out / f"prompt_{name}.txt").write_text(text, encoding="utf-8")
+    text = f"{build_generation_prompt(resolved, 0)}\n\n{_CONTEXT_NOTE}\n"
+    (out / "prompt.txt").write_text(text, encoding="utf-8")
     manifest = {
         "scan": str(args.scan.resolve()), "region_mm": args.region, "prompt": args.prompt,
         "aspect": frame.aspect, "crop_box_px": list(frame.box.as_tuple()),
@@ -100,7 +99,7 @@ def prepare(args: argparse.Namespace) -> int:
     mm = 25.4 / DEFAULT_LAYOUT.dpi
     x, y, width, height = (round(value * mm, 1) for value in frame.box.as_tuple())
     print(f"crop {frame.aspect}: x {x}-{x + width} mm, y {y}-{y + height} mm")
-    print(f"upload in order: 1_page_crop.png, 2_guidance_crop.png, 3_context_thumbnail.png; then paste prompt_A.txt")
+    print("upload in order: 1_page_crop.png, 2_guidance_crop.png, 3_context_thumbnail.png; then paste prompt.txt")
     print(f"files: {out.resolve()}")
     return 0
 

@@ -155,12 +155,13 @@ def test_crop_contains_the_printable_region_and_a_context_thumbnail() -> None:
     assert max(_decode(content[4]).shape[:2]) <= 1024
 
 
-def test_candidates_get_distinct_variants_and_seeds() -> None:
+def test_candidates_share_the_direct_continuation_and_differ_by_seed() -> None:
     fake = FakeGemini()
     _run(fake)
     first, second = fake.image_bodies()
-    assert "Variant A" in first["input"][0]["content"][0]["text"]
-    assert "Variant B" in second["input"][0]["content"][0]["text"]
+    direction = "most natural, direct continuation"
+    assert direction in first["input"][0]["content"][0]["text"]
+    assert first["input"][0]["content"][0]["text"] == second["input"][0]["content"][0]["text"]
     assert first["generation_config"]["seed"] != second["generation_config"]["seed"]
 
 

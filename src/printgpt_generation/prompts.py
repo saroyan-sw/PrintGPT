@@ -29,12 +29,12 @@ _GUIDANCE_DESCRIPTION: Final[str] = (
     "existing white paper."
 )
 
-# Two candidates from one prompt differ only by sampling noise; an explicit
-# per-candidate direction gives the user a real choice.
+# Per-candidate directions; indices past the end reuse the last one. Manual tests
+# (October 2026) showed that asking any candidate for a "different" continuation
+# made Gemini invent a new scene or redraw the whole page, so every candidate
+# gets the same direction and candidates differ by seed only.
 CANDIDATE_VARIANTS: Final[tuple[str, ...]] = (
-    "Variant A: draw the most natural, direct continuation of what is already there.",
-    "Variant B: draw a clearly different but equally plausible continuation from the "
-    "most obvious one, for example a different composition or detail, in the same style.",
+    "Draw the most natural, direct continuation of what is already there.",
 )
 
 

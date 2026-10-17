@@ -243,11 +243,13 @@ window, while the redraw band still covers original ink just outside it.
 `NormalizationRecord.canvas_box` and the translation in `raw_to_canonical`
 record the mapping.
 
-### Candidate variants
+### Candidate directions
 
-Each initial candidate gets its own direction (`prompts.CANDIDATE_VARIANTS`):
-A is the most direct continuation, B a clearly different but plausible one.
-Revisions keep their candidate's direction.
+Every candidate is asked for "the most natural, direct continuation"
+(`prompts.CANDIDATE_VARIANTS`) and gets its own `seed`. In manual Gemini app tests,
+asking a second candidate for a "different" continuation made the model invent an
+unrelated scene (panels, text, extra subjects) or redraw the whole page, so
+candidates now differ by seed only, and the critic chooses between them.
 
 ### Running live
 
